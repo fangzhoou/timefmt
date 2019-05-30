@@ -49,7 +49,7 @@ func Datetime() string {
 	return t.Format(layout)
 }
 
-// 按 pattern 模式返回时间当前时间或传入时间戳 t 的格式化时间
+// 按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间
 // 支持的格式：
 // Y: 年份 4 位，如：2019
 // YY：年份 2 位，如：19
