@@ -5,7 +5,7 @@ Go 语言人性化时间处理
 按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间
 ```
 // 按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间
-timefmt.Format(pattern string, t)
+timefmt.Format(pattern string, t ...int64)
 
 // 如下，输出当前时间：2019-05-30 21:06:05
 timefmt.Format("Y-M-D H:I:S");
