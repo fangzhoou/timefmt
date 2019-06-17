@@ -23,3 +23,11 @@ func Test_Micro(t *testing.T) {
 	t.Log(Nanosecond())
 	t.Log(Time())
 }
+
+func Test_StrToTime(t *testing.T) {
+	str := Format("Y-M-D H:I:S")
+	u := StrToTime(str)
+	t.Log(str)
+	t.Log(u)
+	t.Log(Format("Y-M-D H:I:S", u))
+}

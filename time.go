@@ -121,7 +121,6 @@ func Format(pattern string, s ...int64) string {
 		}
 	}
 
-
 	// 获取时间字符对应的时间
 	for k, v := range sl {
 		if _, ok := timeFormat[v]; ok {
@@ -238,4 +237,12 @@ func getTimeStr(s string, t time.Time) string {
 		}
 	}
 	return ""
+}
+
+// 根据传入的时间字符串，返回当前本地时间戳
+// 支持的格式：2006-01-02 15:04:05
+func StrToTime(str string) int64 {
+	loc, _ := time.LoadLocation("Local")
+	t, _ := time.ParseInLocation(layout, str, loc)
+	return t.Unix()
 }

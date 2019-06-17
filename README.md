@@ -1,16 +1,25 @@
-## timefmt
-
+## timefmt 格式化时间
 Go 人性化时间处理。
 
-按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间
-```
-// 按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间
-timefmt.Format(pattern string, t ...int64)
+// 获取当前时间戳，秒  
+func Time() int64
 
-// 如下，输出当前时间：2019-05-30 21:06:05
-timefmt.Format("Y-M-D H:I:S");
+// 获取当前时间戳，毫秒  
+func Millisecond() int64
+
+// 获取当前时间戳，纳秒  
+func Nanosecond()
+
+// 获取当前日期时间，datetime 格式，如：2019-05-22 22:36:20  
+func Datetime() string
+
+// 按 pattern 模式返回当前时间或传入时间戳 t 的格式化时间  
+func Format(pattern string, s ...int64) string
 ```
-支持的格式：
+// 输出当前时间：2019-05-30 21:06:05
+timefmt.Format("Y-M-D H:I:S")
+```
+**支持的格式：**
 - Y: 年份 4 位，如：2019
 - YY：年份 2 位，如：19
 - YYYY：年份 4 位，如：2019
@@ -39,3 +48,8 @@ timefmt.Format("Y-M-D H:I:S");
 - ss: 秒，有前导 0，取值 0~60 如：03
 - a：上午或下午，小写：am 或 pm
 - A：上午或下午，大写：AM 或 PM
+
+
+// 根据传入的时间字符串，返回当前本地时间戳  
+// 仅支持 datetime 格式，如：2006-01-02 15:04:05  
+func StrToTime(str string) int64
