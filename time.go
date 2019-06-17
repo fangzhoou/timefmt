@@ -42,6 +42,22 @@ var timeFormat = map[string]int{
 	"a":    1,
 }
 
+// 获取当前时间戳，秒
+func Time() int64 {
+	return time.Now().Unix()
+}
+
+// 获取当前时间戳，毫秒
+func Millisecond() int64 {
+	n := time.Now().UnixNano()
+	return n / 1e6
+}
+
+// 获取当前时间戳，纳秒
+func Nanosecond() int64 {
+	return time.Now().UnixNano()
+}
+
 // 获取当前日期时间，datetime 格式：YYYY-mm-dd H:i:s
 // return string，如：2019-05-22 22:36:20
 func Datetime() string {
@@ -89,7 +105,7 @@ func Format(pattern string, s ...int64) string {
 
 	// 遍历字符串，读取时间相关字符
 	p := []rune(pattern)
-	sl := []string{}
+	var sl []string
 	var prev rune
 	for _, v := range p {
 		strV := string(v)

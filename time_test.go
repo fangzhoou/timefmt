@@ -5,8 +5,7 @@ import (
 )
 
 func Test_Datetime(t *testing.T) {
-	s := Datetime()
-	t.Log(s)
+	t.Log(Datetime())
 }
 
 func Test_Format(t *testing.T) {
@@ -17,5 +16,10 @@ func Test_Format(t *testing.T) {
 	t.Log(Format("yy-mm-dd hh:ii:ss", 1559211727))
 	t.Log(Format("yyyy-mm-dd a hh:ii:ss", 1559211727))
 	t.Log(Format("Y年M月D日 H时I分s秒"))
+}
 
+func Test_Micro(t *testing.T) {
+	t.Log(Millisecond())
+	t.Log(Nanosecond())
+	t.Log(Time())
 }
