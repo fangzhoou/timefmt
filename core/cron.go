@@ -35,9 +35,6 @@ func (c *Cron) AddJob(spec string, fn func()) error {
 
 // 启动定时任务
 func (c *Cron) Start() {
-    // 添加定时任务结点
-    go addCronNode()
-
     ticker := time.NewTicker(time.Millisecond)
     for {
         select {

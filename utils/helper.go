@@ -1,6 +1,8 @@
 package utils
 
 import (
+    "crypto/md5"
+    "encoding/hex"
     "errors"
     "net"
 )
@@ -21,4 +23,12 @@ func GetLocalIP() (ip string, err error) {
     }
     err = errors.New("IP not found")
     return
+}
+
+// 获取 md5 值
+func Md5(str string) string {
+    m := md5.New()
+    m.Write([]byte(str))
+    md5Data := m.Sum([]byte(""))
+    return hex.EncodeToString(md5Data)
 }

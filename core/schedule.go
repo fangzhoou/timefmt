@@ -57,7 +57,7 @@ func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 
 // 添加元素
 func (h *entryHeap) Push(x interface{}) {
-    // 使用指针操作堆，因为操作需要反应到原切片队列里
+    // 使用指针操作堆，因为操作需要反应到原切片里
     *h = append(*h, x.(*Entry))
 }
 

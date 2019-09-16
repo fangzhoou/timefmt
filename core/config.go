@@ -12,7 +12,7 @@ import (
 type config struct {
     Name          string
     Port          string
-    EtcdEndpoints string `toml:"etcd_endpoints"`
+    EtcdEndpoints []string `toml:"etcd_endpoints"`
 }
 
 var Conf config

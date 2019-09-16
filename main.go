@@ -9,11 +9,15 @@ import (
 
 func init() {
     core.LoadConfig()
+    core.NewEtcd()
 }
 
 func main() {
+    // 服务注册与监控
+    core.RegisterAndWatch()
+
+    fmt.Println(1111, core.Conf)
     cron := core.NewCron()
-    fmt.Println(1111)
 
     cron.AddJob("*/5 * * * * *", func() {
         fmt.Println(time.Now().String(), ":  this is a test job 11111")
