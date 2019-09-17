@@ -13,13 +13,18 @@ import (
 // 服务注册 etcd 的租约时间，3 秒
 const LeaseTime = 3
 
+
+// 获取服务节点前缀
+func getNodePrefix() string {
+    return Conf.Name + "/node/"
+}
+
 // 服务对象
 type server struct {
     Name    string
     IP      string
     LeaseId clientv3.LeaseID
 }
-
 // 注册服务
 func (s *server) register() {
     // 查看服务是否存在
@@ -126,9 +131,4 @@ func RegisterAndWatch() {
 
     // 注册成功启动服务发现
     go m.watchServers()
-}
-
-// 获取服务节点前缀
-func getNodePrefix() string {
-    return Conf.Name + "/node/"
 }

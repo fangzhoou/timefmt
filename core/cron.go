@@ -3,6 +3,8 @@ package core
 import (
     "container/heap"
     "time"
+
+    "github.com/fangzhoou/dcron/service"
 )
 
 // 定时任务处理对象
@@ -35,6 +37,9 @@ func (c *Cron) AddJob(spec string, fn func()) error {
 
 // 启动定时任务
 func (c *Cron) Start() {
+    // 监听 web 服务
+    go service.ListenAndServe()
+
     ticker := time.NewTicker(time.Millisecond)
     for {
         select {
