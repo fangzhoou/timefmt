@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "sync"
+    "time"
 
     "github.com/coreos/etcd/mvcc/mvccpb"
     "github.com/fangzhoou/dcron/utils"
@@ -13,6 +14,43 @@ import (
 // 服务注册 etcd 的租约时间，3 秒
 const LeaseTime = 3
 
+// etcd client
+var etcdClient *clientv3.Client
+
+// 初始化 etcd，建立 etcd 链接
+func InitEtcd() {
+    cli, err := clientv3.New(clientv3.Config{
+        Endpoints:   Conf.EtcdEndpoints,
+        DialTimeout: 5 * time.Second,
+    })
+    if err != nil {
+        panic(err)
+    }
+    etcdClient = cli
+
+    // 服务注册与监控
+    registerAndWatch()
+}
+
+// 注册服务
+func registerAndWatch() {
+    ip, err := utils.GetLocalIP()
+    if err != nil {
+        panic(err)
+    }
+    s := &server{Name: utils.Md5(ip), IP: ip}
+    s.register()
+
+    // 保持服务心跳
+    go s.keepAlive()
+
+    // 获取所有服务结点
+    m := &master{NodeList: map[string]string{}}
+    m.getNodeList()
+
+    // 注册成功启动服务发现
+    go m.watchServers()
+}
 
 // 获取服务节点前缀
 func getNodePrefix() string {
@@ -25,6 +63,7 @@ type server struct {
     IP      string
     LeaseId clientv3.LeaseID
 }
+
 // 注册服务
 func (s *server) register() {
     // 查看服务是否存在
@@ -111,24 +150,4 @@ func (m *master) watchServers() {
             }
         }
     }
-}
-
-// 注册服务
-func RegisterAndWatch() {
-    ip, err := utils.GetLocalIP()
-    if err != nil {
-        panic(err)
-    }
-    s := &server{Name: utils.Md5(ip), IP: ip}
-    s.register()
-
-    // 保持服务心跳
-    go s.keepAlive()
-
-    // 获取所有服务结点
-    m := &master{NodeList: map[string]string{}}
-    m.getNodeList()
-
-    // 注册成功启动服务发现
-    go m.watchServers()
 }

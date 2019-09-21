@@ -11,7 +11,7 @@ import (
 // 配置文件
 type config struct {
     Name          string
-    Port          string
+    Port          int
     EtcdEndpoints []string `toml:"etcd_endpoints"`
 }
 

@@ -14,11 +14,11 @@ const (
 )
 
 // 任务接口
-type job interface {
-    run()
+type mjob interface {
+   run()
 }
 
-// 将方法转为支持 job 的类型
+//将方法转为支持 job 的类型
 type funcJob func()
 
 func (f funcJob) run() { f() }
@@ -29,7 +29,7 @@ type Schedule interface {
     Next(time.Time) time.Time
 }
 
-// 单个执行任务对象
+// 单个任务执行对象
 type Entry struct {
     // 时刻表
     Schedule Schedule
@@ -41,7 +41,7 @@ type Entry struct {
     NextTime time.Time
 
     // 待执行的任务
-    Job job
+    Job mjob
 }
 
 // 任务清单队列，小顶堆，实现 container/heap
@@ -71,5 +71,8 @@ func (h *entryHeap) Pop() interface{} {
 
 // 获取堆中首个元素
 func (h *entryHeap) First() *Entry {
-    return (*h)[0]
+    if len(*h) > 0 {
+        return (*h)[0]
+    }
+    return nil
 }

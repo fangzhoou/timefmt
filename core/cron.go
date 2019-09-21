@@ -2,9 +2,8 @@ package core
 
 import (
     "container/heap"
+    "fmt"
     "time"
-
-    "github.com/fangzhoou/dcron/service"
 )
 
 // 定时任务处理对象
@@ -25,10 +24,10 @@ func (c *Cron) AddJob(spec string, fn func()) error {
         return err
     }
     e := &Entry{
-        schedule,
-        time.Time{},
-        schedule.Next(time.Now()),
-        funcJob(fn),
+        Schedule: schedule,
+        PrevTime: time.Time{},
+        NextTime: schedule.Next(time.Now()),
+        Job:      funcJob(fn),
     }
     heap.Push(c.Entries, e)
     c.Entries.Push(e)
@@ -37,22 +36,37 @@ func (c *Cron) AddJob(spec string, fn func()) error {
 
 // 启动定时任务
 func (c *Cron) Start() {
-    // 监听 web 服务
-    go service.ListenAndServe()
+    fmt.Println(111, Conf)
+    // 初始化必要模块
+    initModules()
+    fmt.Println(222)
 
     ticker := time.NewTicker(time.Millisecond)
     for {
         select {
         case <-ticker.C:
             // 任务队列为小顶堆，每次都读取根结点，比较下次执行时间
-            e := c.Entries.First()
-            if t := time.Now(); t.UnixNano() > e.NextTime.UnixNano() {
-                execE := heap.Pop(c.Entries)
-                execE.(*Entry).Job.run()
-                execE.(*Entry).PrevTime = t
-                execE.(*Entry).NextTime = execE.(*Entry).Schedule.Next(t)
-                c.Entries.Push(execE)
+            entry := c.Entries.First()
+            t := time.Now()
+            if entry != nil && t.UnixNano() > entry.NextTime.UnixNano() {
+                e := heap.Pop(c.Entries)
+                e.(*Entry).Job.run()
+                e.(*Entry).PrevTime = t
+                e.(*Entry).NextTime = e.(*Entry).Schedule.Next(t)
+                c.Entries.Push(e)
             }
         }
     }
+}
+
+// 初始化必要组件
+func initModules() {
+    // 初始化 etcd
+    InitEtcd()
+
+    // 初始化任务队列
+    InitJobQueue()
+
+    // 监听 http 服务
+    go ListenAndServe()
 }

@@ -5,6 +5,8 @@ import (
     "encoding/hex"
     "errors"
     "net"
+    "os"
+    "path/filepath"
 )
 
 // 获取本地 ip
@@ -31,4 +33,13 @@ func Md5(str string) string {
     m.Write([]byte(str))
     md5Data := m.Sum([]byte(""))
     return hex.EncodeToString(md5Data)
+}
+
+// 获取当前根目录
+func GetRootPath() (string, error) {
+    dir, err := os.Getwd()
+    if err != nil {
+        return "", err
+    }
+    return filepath.Dir(dir), nil
 }
