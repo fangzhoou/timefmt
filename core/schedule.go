@@ -13,16 +13,6 @@ const (
     StatusInvalid
 )
 
-// 任务接口
-type mjob interface {
-   run()
-}
-
-//将方法转为支持 job 的类型
-type funcJob func()
-
-func (f funcJob) run() { f() }
-
 // 时刻表接口
 type Schedule interface {
     // 获取任务的下一次执行时间
@@ -41,7 +31,7 @@ type Entry struct {
     NextTime time.Time
 
     // 待执行的任务
-    Job mjob
+    Job *Job
 }
 
 // 任务清单队列，小顶堆，实现 container/heap

@@ -1,4 +1,4 @@
-// 提供对外 http RESTFul 接口
+// 提供对外 http RESTFul 接口，地址：0.0.0.0:port
 // /job [post/put] 添加任务
 // /job [path] 修改任务
 // /job [get] 获取任务列表
@@ -25,24 +25,26 @@ type Handler struct {
 // 添加任务
 // @param name string 任务名称
 // @param spec string 时间描述
-// @param desc string 任务描述
+// @param type string 执行方式
+// @param exec string 执行语句
 // @param args map[string]interface{} 附带参数
+// @param depend []uint64 依赖的任务 id
+// @param desc string 任务描述
 func (h *Handler) addJob() {
-    p := struct {
-        Name string
-        Spec string
-        Desc string
-        Args map[string]interface{}
-    }{Args: make(map[string]interface{}, 0)}
+    p := &Job{Args: map[string]interface{}{}}
     err := json.Unmarshal(h.ctx.PostBody(), &p)
     if err != nil {
         fmt.Errorf(err.Error())
-        h.send(400, "params error", nil)
+        h.send(400, "job args parse error", nil)
+        return
+    }
+    if p.Name == "" || p.Spec == "" || p.Type == "" || p.Exec == "" {
+        h.send(400, "args name、sepc、type、exec can't be empty", nil)
         return
     }
 
     // 添加任务
-    err = JobQueue.Add(p.Name, p.Spec, p.Desc, p.Args)
+    err = JobQueue.Add(p)
     if err != nil {
         fmt.Errorf(err.Error())
         h.send(500, err.Error(), nil)
@@ -108,7 +110,7 @@ func (h *Handler) HandleFastHttp(ctx *fasthttp.RequestCtx) {
         switch method {
         case "get": // get 获取任务列表
             h.findJobs()
-        case "post", "put": //  post，put 新增任务
+        case "post", "put": // post，put 新增任务
             h.addJob()
         default:
             h.notFound() // 404

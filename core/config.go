@@ -10,8 +10,16 @@ import (
 
 // 配置文件
 type config struct {
-    Name          string
-    Port          int
+    // 应用名称
+    Name string
+
+    // http 服务端口
+    Port int
+
+    // 数据存储路径
+    Storage string
+
+    // etcd 结点配置地址
     EtcdEndpoints []string `toml:"etcd_endpoints"`
 }
 

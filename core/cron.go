@@ -8,18 +8,21 @@ import (
 
 // 定时任务处理对象
 // 管理、调用定时任务的方法
-type Cron struct {
+type cron struct {
     // 定时任务待执行队列，小顶堆
     Entries *entryHeap
 }
 
-func NewCron() *Cron {
-    return &Cron{Entries: &entryHeap{}}
+var Cron cron
+
+func NewCron() *cron {
+    Cron = cron{Entries: &entryHeap{}}
+    return &Cron
 }
 
 // 添加定时任务
-func (c *Cron) AddJob(spec string, fn func()) error {
-    schedule, err := Parse(spec)
+func (c *cron) AddJob(j *Job) error {
+    schedule, err := Parse(j.Spec)
     if err != nil {
         return err
     }
@@ -27,7 +30,7 @@ func (c *Cron) AddJob(spec string, fn func()) error {
         Schedule: schedule,
         PrevTime: time.Time{},
         NextTime: schedule.Next(time.Now()),
-        Job:      funcJob(fn),
+        Job:      j,
     }
     heap.Push(c.Entries, e)
     c.Entries.Push(e)
@@ -35,21 +38,22 @@ func (c *Cron) AddJob(spec string, fn func()) error {
 }
 
 // 启动定时任务
-func (c *Cron) Start() {
-    fmt.Println(111, Conf)
+func (c *cron) Start() {
+    fmt.Println(Conf.Name + " start...")
     // 初始化必要模块
     initModules()
-    fmt.Println(222)
 
     ticker := time.NewTicker(time.Millisecond)
+    fmt.Println(Conf.Name + " is working.")
     for {
         select {
         case <-ticker.C:
             // 任务队列为小顶堆，每次都读取根结点，比较下次执行时间
             entry := c.Entries.First()
             t := time.Now()
-            if entry != nil && t.UnixNano() > entry.NextTime.UnixNano() {
+            if entry != nil && t.After(entry.NextTime) {
                 e := heap.Pop(c.Entries)
+                fmt.Println("aaaaa")
                 e.(*Entry).Job.run()
                 e.(*Entry).PrevTime = t
                 e.(*Entry).NextTime = e.(*Entry).Schedule.Next(t)
@@ -65,7 +69,10 @@ func initModules() {
     InitEtcd()
 
     // 初始化任务队列
-    InitJobQueue()
+    err := InitJobQueue()
+    if err != nil {
+        panic(err)
+    }
 
     // 监听 http 服务
     go ListenAndServe()
