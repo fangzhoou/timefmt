@@ -1,9 +1,11 @@
 package core
 
 import (
+    "fmt"
     "io/ioutil"
     "os"
     "path/filepath"
+    "runtime/debug"
 
     "github.com/BurntSushi/toml"
 )
@@ -27,6 +29,14 @@ var Conf config
 
 // 加载配置文件
 func LoadConfig() {
+    defer func() {
+        if r := recover(); r != nil {
+            fmt.Printf("Config fatal: %v\n", r)
+            debug.PrintStack()
+            os.Exit(-2)
+        }
+    }()
+
     rootPath, err := os.Getwd()
     if err != nil {
         panic(err)
@@ -40,6 +50,6 @@ func LoadConfig() {
         panic(err)
     }
     if _, err := toml.Decode(string(tomlData), &Conf); err != nil {
-        panic("load config failed")
+        panic("toml decode config data failed: " + err.Error())
     }
 }

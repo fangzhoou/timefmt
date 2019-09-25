@@ -3,6 +3,9 @@ package core
 import (
     "context"
     "errors"
+    "fmt"
+    "os"
+    "runtime/debug"
     "sync"
     "time"
 
@@ -17,8 +20,22 @@ const LeaseTime = 3
 // etcd client
 var etcdClient *clientv3.Client
 
-// 初始化 etcd，建立 etcd 链接
-func InitEtcd() {
+// 初始化 etcd
+// 利用 etcd 实现服务发现和
+func InitEtcd(sc StopChan) {
+    if len(Conf.EtcdEndpoints) == 0 {
+        // 没有配 etcd 则返回空，服务为单机版
+        return
+    }
+
+    defer func() {
+        if r := recover(); r != nil {
+            fmt.Printf("Etcd fatal: %v\n", r)
+            debug.PrintStack()
+            os.Exit(-2)
+        }
+    }()
+
     cli, err := clientv3.New(clientv3.Config{
         Endpoints:   Conf.EtcdEndpoints,
         DialTimeout: 5 * time.Second,
@@ -29,27 +46,33 @@ func InitEtcd() {
     etcdClient = cli
 
     // 服务注册与监控
-    registerAndWatch()
-}
-
-// 注册服务
-func registerAndWatch() {
-    ip, err := utils.GetLocalIP()
+    err = registerAndWatch(sc)
     if err != nil {
         panic(err)
     }
-    s := &server{Name: utils.Md5(ip), IP: ip}
-    s.register()
+}
 
-    // 保持服务心跳
-    go s.keepAlive()
+// 注册服务及心跳监控
+func registerAndWatch(sc StopChan) error {
+    // 注册服务
+    ip, err := utils.GetLocalIP()
+    if err != nil {
+        return err
+    }
+    s := NewServer(ip)
+    err = s.register()
+    if err != nil {
+        return err
+    }
+    s.keepAlive(sc)
 
     // 获取所有服务结点
     m := &master{NodeList: map[string]string{}}
     m.getNodeList()
 
-    // 注册成功启动服务发现
+    // 启动服务监控
     go m.watchServers()
+    return nil
 }
 
 // 获取服务节点前缀
@@ -64,47 +87,58 @@ type server struct {
     LeaseId clientv3.LeaseID
 }
 
+func NewServer(ip string) *server {
+    return &server{Name: utils.Md5(ip), IP: ip}
+}
+
 // 注册服务
-func (s *server) register() {
+func (s *server) register() error {
     // 查看服务是否存在
     key := Conf.Name + "/node/" + s.Name
     resp, err := etcdClient.Get(context.TODO(), key)
     if err != nil {
-        panic(err)
+        return err
     }
     if resp.Count > 0 {
-        panic(errors.New("server " + key + " already exists"))
+        return errors.New(`server "` + key + `"  already registered in etcd`)
     }
 
     // 建立 etcd 租约关系
     gResp, err := etcdClient.Grant(context.TODO(), LeaseTime)
     if err != nil {
-        panic(err)
+        return err
     }
     s.LeaseId = gResp.ID
     _, err = etcdClient.Put(context.TODO(), getNodePrefix()+s.Name, s.IP, clientv3.WithLease(s.LeaseId))
     if err != nil {
-        panic(err)
+        return err
     }
+    return nil
 }
 
 // 服务心跳
-func (s *server) keepAlive() {
-    for {
-        ka, err := etcdClient.KeepAlive(context.TODO(), s.LeaseId)
-        if err != nil {
-            panic(err)
-        }
-        select {
-        case re := <-ka:
-            if re == nil {
-                _, err := etcdClient.Revoke(context.TODO(), s.LeaseId)
-                if err != nil {
-                    panic(err)
+func (s *server) keepAlive(sc StopChan) {
+    ka, err := etcdClient.KeepAlive(context.TODO(), s.LeaseId)
+    if err != nil {
+        fmt.Errorf(err.Error())
+        sc.Done()
+        return
+    }
+    go func() {
+        for {
+            select {
+            case re := <-ka:
+                if re == nil {
+                    _, err := etcdClient.Revoke(context.TODO(), s.LeaseId)
+                    if err != nil {
+                        fmt.Errorf(err.Error())
+                        sc.Done()
+                        return
+                    }
                 }
             }
         }
-    }
+    }()
 }
 
 // 服务监控
