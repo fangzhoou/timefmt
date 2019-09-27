@@ -1,13 +1,10 @@
 package core
 
 import (
-    "fmt"
+    "github.com/BurntSushi/toml"
     "io/ioutil"
     "os"
     "path/filepath"
-    "runtime/debug"
-
-    "github.com/BurntSushi/toml"
 )
 
 // 配置文件
@@ -30,11 +27,7 @@ var Conf config
 // 加载配置文件
 func LoadConfig() {
     defer func() {
-        if r := recover(); r != nil {
-            fmt.Printf("Config fatal: %v\n", r)
-            debug.PrintStack()
-            os.Exit(-2)
-        }
+        log.RecoverPanic(recover())
     }()
 
     rootPath, err := os.Getwd()

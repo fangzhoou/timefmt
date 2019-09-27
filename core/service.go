@@ -3,9 +3,6 @@ package core
 import (
     "context"
     "errors"
-    "fmt"
-    "os"
-    "runtime/debug"
     "sync"
     "time"
 
@@ -14,64 +11,65 @@ import (
     "go.etcd.io/etcd/clientv3"
 )
 
-// 服务注册 etcd 的租约时间，3 秒
+// 服务注册 etcd 的租约时间，默认 3 秒
 const LeaseTime = 3
 
-// etcd client
-var etcdClient *clientv3.Client
+// etcd 服务
+type etcd struct {
+    Status int
+    Cli    *clientv3.Client
+}
 
-// 初始化 etcd
-// 利用 etcd 实现服务发现和
-func InitEtcd(sc StopChan) {
+var Etcd = &etcd{}
+
+// 初始化 etcd，没有配置 etcd 则服务为单机版
+// 利用 etcd 实现服务发现和服务治理
+func InitEtcd(ctx context.Context) error {
+    // 没有配置 etcd 返回空
     if len(Conf.EtcdEndpoints) == 0 {
-        // 没有配 etcd 则返回空，服务为单机版
-        return
+        return nil
     }
-
-    defer func() {
-        if r := recover(); r != nil {
-            fmt.Printf("Etcd fatal: %v\n", r)
-            debug.PrintStack()
-            os.Exit(-2)
-        }
-    }()
 
     cli, err := clientv3.New(clientv3.Config{
         Endpoints:   Conf.EtcdEndpoints,
         DialTimeout: 5 * time.Second,
     })
     if err != nil {
-        panic(err)
+        return err
     }
-    etcdClient = cli
+    Etcd.Cli = cli
 
     // 服务注册与监控
-    err = registerAndWatch(sc)
+    err = registerAndWatch(ctx)
     if err != nil {
-        panic(err)
+        return err
     }
+    return nil
 }
 
 // 注册服务及心跳监控
-func registerAndWatch(sc StopChan) error {
+func registerAndWatch(ctx context.Context) error {
     // 注册服务
     ip, err := utils.GetLocalIP()
     if err != nil {
         return err
     }
     s := NewServer(ip)
-    err = s.register()
+    err = s.register(ctx)
     if err != nil {
         return err
     }
-    s.keepAlive(sc)
+    go s.keepAlive(ctx)
 
     // 获取所有服务结点
     m := &master{NodeList: map[string]string{}}
-    m.getNodeList()
+    err = m.getNodeList(ctx)
+    if err != nil {
+        return err
+    }
 
     // 启动服务监控
-    go m.watchServers()
+    go m.watchServers(ctx)
     return nil
 }
 
@@ -92,10 +90,10 @@ func NewServer(ip string) *server {
 }
 
 // 注册服务
-func (s *server) register() error {
+func (s *server) register(ctx context.Context) error {
     // 查看服务是否存在
     key := Conf.Name + "/node/" + s.Name
-    resp, err := etcdClient.Get(context.TODO(), key)
+    resp, err := Etcd.Cli.Get(ctx, key)
     if err != nil {
         return err
     }
@@ -104,12 +102,12 @@ func (s *server) register() error {
     }
 
     // 建立 etcd 租约关系
-    gResp, err := etcdClient.Grant(context.TODO(), LeaseTime)
+    gResp, err := Etcd.Cli.Grant(ctx, LeaseTime)
     if err != nil {
         return err
     }
     s.LeaseId = gResp.ID
-    _, err = etcdClient.Put(context.TODO(), getNodePrefix()+s.Name, s.IP, clientv3.WithLease(s.LeaseId))
+    _, err = Etcd.Cli.Put(ctx, getNodePrefix()+s.Name, s.IP, clientv3.WithLease(s.LeaseId))
     if err != nil {
         return err
     }
@@ -117,28 +115,26 @@ func (s *server) register() error {
 }
 
 // 服务心跳
-func (s *server) keepAlive(sc StopChan) {
-    ka, err := etcdClient.KeepAlive(context.TODO(), s.LeaseId)
+func (s *server) keepAlive(ctx context.Context) {
+    ka, err := Etcd.Cli.KeepAlive(ctx, s.LeaseId)
     if err != nil {
-        fmt.Errorf(err.Error())
-        sc.Done()
+        log.Error(err)
+        CronCancel()
         return
     }
-    go func() {
-        for {
-            select {
-            case re := <-ka:
-                if re == nil {
-                    _, err := etcdClient.Revoke(context.TODO(), s.LeaseId)
-                    if err != nil {
-                        fmt.Errorf(err.Error())
-                        sc.Done()
-                        return
-                    }
+    for {
+        select {
+        case re := <-ka:
+            if re == nil {
+                _, err := Etcd.Cli.Revoke(ctx, s.LeaseId)
+                if err != nil {
+                    log.Error(err)
+                    CronCancel()
+                    return
                 }
             }
         }
-    }()
+    }
 }
 
 // 服务监控
@@ -149,24 +145,26 @@ type master struct {
 }
 
 // 获取服务列表
-func (m *master) getNodeList() {
-    resp, err := etcdClient.Get(context.TODO(), getNodePrefix(), clientv3.WithPrefix())
+func (m *master) getNodeList(ctx context.Context) error {
+    resp, err := Etcd.Cli.Get(ctx, getNodePrefix(), clientv3.WithPrefix())
     if err != nil {
-        panic(err)
+        return err
     }
     for _, kv := range resp.Kvs {
         m.NodeList[string(kv.Key)] = string(kv.Value)
     }
+    return nil
 }
 
 // 监控服务列表，服务节点有变动时更新
-func (m *master) watchServers() {
+func (m *master) watchServers(ctx context.Context) {
+    wc := Etcd.Cli.Watch(ctx, getNodePrefix(), clientv3.WithPrefix())
     for {
-        wc := etcdClient.Watch(context.TODO(), getNodePrefix(), clientv3.WithPrefix())
         select {
         case resp := <-wc:
             if resp.Err() != nil {
-                panic(resp.Err())
+                log.Error(resp.Err())
+                CronCancel()
             }
             for _, ev := range resp.Events {
                 switch ev.Type {

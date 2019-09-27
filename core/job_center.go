@@ -196,12 +196,10 @@ func (jq *jobQueue) GetJobById(i int) (j Job, err error) {
 }
 
 // 任务队列操作
-var JobQueue *jobQueue
+var JobQueue = &jobQueue{}
 
 // 初始化 JobQueue
 func InitJobQueue() error {
-    JobQueue = &jobQueue{}
-
     // 读取本地存储的 job
     JobQueue.mu.Lock()
     defer JobQueue.mu.Unlock()

@@ -2,29 +2,23 @@ package core
 
 import (
     "container/heap"
+    "context"
     "fmt"
     "time"
 )
-
-type StopChan chan bool
-
-func (sc StopChan) Done() {
-    sc <- true
-}
 
 // 定时任务处理对象
 // 管理、调度任务队列
 type cron struct {
     // 定时任务待执行队列，小顶堆
     Entries *entryHeap
-
-    Stop StopChan
 }
 
 var Cron cron
+var CronCancel context.CancelFunc
 
 func NewCron() *cron {
-    Cron = cron{Entries: &entryHeap{}, Stop: make(StopChan)}
+    Cron = cron{Entries: &entryHeap{}}
     return &Cron
 }
 
@@ -47,12 +41,18 @@ func (c *cron) AddJob(j *Job) error {
 
 // 启动定时任务
 func (c *cron) Start() {
-    fmt.Println(Conf.Name + " service is starting...")
+    log.Info(Conf.Name, " service is starting...")
+    ctx, cancel := context.WithCancel(context.Background())
+    CronCancel = cancel
 
     // 初始化必要模块
-    c.initModules()
+    err := c.initModules(ctx)
+    if err != nil {
+        log.Error(err)
+        CronCancel()
+    }
 
-    fmt.Println(Conf.Name + " service is working.")
+    log.Info(Conf.Name, " service is working.")
     // 启动毫秒时钟
     for {
         select {
@@ -67,24 +67,30 @@ func (c *cron) Start() {
                 e.(*Entry).NextTime = e.(*Entry).Schedule.Next(t)
                 c.Entries.Push(e)
             }
-        case <-c.Stop:
-            panic(Conf.Name + " service was stop")
+        case <-ctx.Done():
+            fmt.Println(11122)
+            log.Fatal(11111, Conf.Name, " service was stop")
+            return
         }
     }
 }
 
 // 初始化必要组件
-func (c *cron) initModules() {
-    fmt.Println("init modules...")
+func (c *cron) initModules(ctx context.Context) error {
+    log.Info("init modules...")
     // 初始化 etcd
-    InitEtcd(c.Stop)
+    err := InitEtcd(ctx)
+    if err != nil {
+        return err
+    }
 
     // 初始化任务队列
-    err := InitJobQueue()
+    err = InitJobQueue()
     if err != nil {
-        panic(err)
+        return err
     }
 
     // 监听 http 服务
     go ListenAndServe()
+    return nil
 }
