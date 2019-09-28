@@ -3,12 +3,15 @@ package core
 import (
     "bufio"
     "bytes"
+    "context"
     "encoding/gob"
     "errors"
     "fmt"
     "io"
     "os"
     "os/exec"
+    "path"
+    "strconv"
     "strings"
     "sync"
 
@@ -16,17 +19,19 @@ import (
 )
 
 const (
-    // 任务状态：关闭
-    JobStatusOff = 0
-    // 任务状态：启用
-    JobStatusOn = 1
+    // 任务状态：关闭 0
+    JobStatusOff int = iota
+    // 任务状态：启用 1
+    JobStatusOn
+    // 任务状态：删除 2
+    JobStatusDisable
 
     // job 队列存储文件名
     JobStoreFileName = "jobqueue"
 )
 
 // 任务
-type Job struct {
+type job struct {
     // 任务 id
     Id uint64
 
@@ -36,8 +41,8 @@ type Job struct {
     // 任务执行时间
     Spec string
 
-    // 执行任务方式
-    Type string
+    // 执行任务方式，shell、http-x
+    Mode string
 
     // 执行语句
     Exec string
@@ -52,22 +57,31 @@ type Job struct {
     Status int
 }
 
+// 创建 job 对象
+func NewJob(id uint64, name, spec, mode, exec string) *job {
+    return &job{
+        Id:   id,
+        Name: name,
+        Spec: spec,
+        Mode: mode,
+        Exec: exec,
+    }
+}
+
 // 执行任务
-func (j *Job) run() error {
-    switch strings.ToLower(j.Type) {
+func (j *job) run() error {
+    switch strings.ToLower(j.Mode) {
     case "shell":
         return j.runShell()
     case "http-get", "http-post", "http-put", "http-patch", "http-delete", "http-head", "http-options":
         return j.runHttp()
-    case "rpc":
-        return j.runRpc()
     default:
-        return errors.New("job not support exec type: " + j.Type)
+        return errors.New("job not support exec type: " + j.Mode)
     }
 }
 
 // 运行 shell 命令
-func (j *Job) runShell() error {
+func (j *job) runShell() error {
     cmd := exec.Command(`/bin/bash`, "-c", j.Exec)
     var out bytes.Buffer
     cmd.Stdout = &out
@@ -80,44 +94,115 @@ func (j *Job) runShell() error {
 }
 
 // 执行 http 请求
-func (j *Job) runHttp() error {
-    return nil
-}
-
-// 执行 rpc 请求
-func (j *Job) runRpc() error {
+func (j *job) runHttp() error {
     return nil
 }
 
 // 任务队列
 type jobQueue struct {
-    Jobs []Job
+    // 任务队列，存放所有的任务
+    Jobs []*job
+
+    // 用于存放任务名称，添加任务时判断是否有重名的任务，重名任务不可添加
+    JobsName map[string]int
 
     mu sync.Mutex
 }
 
 // 添加定时任务
-func (jq *jobQueue) Add(j *Job) error {
+func (jq *jobQueue) Add(ctx context.Context, j *job) error {
     // 查看任务队列里是否存在同名任务
-    for _, job := range jq.Jobs {
-        if job.Name == j.Name {
-            return errors.New(fmt.Sprintf(`job "%s" already existed`, j.Name))
-        }
+    if _, ok := jq.JobsName[j.Name]; ok {
+        return errors.New(fmt.Sprintf(`job name "%s" already existed`, j.Name))
     }
 
-    // 序列化 job 对象到本地存储文件
-    jq.mu.Lock()
-    err := j.serializeAndSave()
+    // 单机版创建新任务
+    if Etcd.Cli == nil {
+        id, err := jq.getSequenceId(ctx)
+        if err != nil {
+            return err
+        }
+        job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
+        job.Args = j.Args
+        job.Desc = j.Desc
+
+        // 序列化 job 对象到本地存储文件
+        jq.mu.Lock()
+        err = job.serializeAndSave()
+        if err != nil {
+            return err
+        }
+        jq.Jobs = append(jq.Jobs, job)
+        jq.mu.Unlock()
+        return nil
+    }
+
+    // 集群创建新任务
+    // 利用 etcd 租约功能实现分布式锁
+    em, err := NewEtcdMutex(getAddJobMutexKey())
     if err != nil {
         return err
     }
-    jq.Jobs = append(jq.Jobs, *j)
-    jq.mu.Unlock()
+    em.Lock()
+    defer em.Unlock()
+    resp, err := Etcd.Cli.Get(ctx, getMaxJobIdKey())
+    if err != nil {
+        return err
+    }
+    if resp.Count > 0 {
+        oid, err := strconv.ParseUint(string(resp.Kvs[0].Value), 10, 64)
+        if err != nil {
+            return err
+        }
+        id := oid + 1
+        job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
+        job.Args = j.Args
+        job.Desc = j.Desc
+
+        // 序列化 job 对象到本地存储文件
+        jq.mu.Lock()
+        err = job.serializeAndSave()
+        if err != nil {
+            return err
+        }
+        jq.Jobs = append(jq.Jobs, job)
+        jq.mu.Unlock()
+        return nil
+    }
+
     return nil
 }
 
+// 获取 job id
+// id 等于已存在的最大任务 id + 1
+// 集群的任务最大 id 存储在 etcd，key：Conf.name+"max_id"
+// 单机则读取本地任务队列的长度加 1：len(JobQueue) + 1
+func (jq *jobQueue) getSequenceId(ctx context.Context) (uint64, error) {
+    var id uint64
+    if Etcd.Cli == nil {
+        id = uint64(len(jq.Jobs)) + 1
+        return id, nil
+    }
+
+    // 从 etcd 中获取任务序列 id
+    resp, err := Etcd.Cli.Get(ctx, getMaxJobIdKey())
+    if err != nil {
+        return id, err
+    }
+    if resp.Count > 0 {
+        kv := resp.Kvs[0]
+        id, err = strconv.ParseUint(string(kv.Value), 10, 64)
+        if err != nil {
+            return id, err
+        }
+    } else {
+        id = 1
+    }
+    return id, nil
+}
+
 // 序列化并保存到本地
-func (j *Job) serializeAndSave() error {
+func (j *job) serializeAndSave() error {
     fileName, err := getJobStoreFile()
     if err != nil {
         return err
@@ -150,7 +235,7 @@ func getJobStoreFile() (string, error) {
     if err != nil {
         return "", err
     }
-    d := fmt.Sprintf("%s/%s", rootPath, Conf.Name+"-data")
+    d := path.Join(rootPath, Conf.Name+"-data")
     _, err = os.Stat(d)
     if err != nil {
         if os.IsNotExist(err) {
@@ -164,17 +249,17 @@ func getJobStoreFile() (string, error) {
     }
 
     // 判断文件是否存在，不存在则创建
-    fileName := fmt.Sprintf("%s/%s", d, JobStoreFileName)
+    fileName := path.Join(d, JobStoreFileName)
     _, err = os.Stat(fileName)
     if err != nil {
         if os.IsNotExist(err) {
             f, err := os.Create(fileName)
             if err != nil {
-                return "", nil
+                return "", err
             }
             f.Close()
         } else {
-            return "", nil
+            return "", err
         }
     }
 
@@ -182,7 +267,7 @@ func getJobStoreFile() (string, error) {
 }
 
 // 获取第 i 个任务
-func (jq *jobQueue) GetJobById(i int) (j Job, err error) {
+func (jq *jobQueue) GetJobById(i int) (j *job, err error) {
     if len(jq.Jobs) == 0 {
         err = fmt.Errorf("job queue is empty")
         return
@@ -199,10 +284,9 @@ func (jq *jobQueue) GetJobById(i int) (j Job, err error) {
 var JobQueue = &jobQueue{}
 
 // 初始化 JobQueue
+// 读取本地存储的 job 队列数据
 func InitJobQueue() error {
-    // 读取本地存储的 job
-    JobQueue.mu.Lock()
-    defer JobQueue.mu.Unlock()
+    log.Info("load local job queue...")
     fileName, err := getJobStoreFile()
     if err != nil {
         return err
@@ -212,11 +296,12 @@ func InitJobQueue() error {
     if err != nil {
         return err
     }
-    fi, err := file.Stat()
+    info, err := file.Stat()
     if err != nil {
         return err
     }
-    if fi.Size() == 0 {
+    if info.Size() == 0 {
+        log.Info("local job queue is empty")
         return nil
     }
 
@@ -230,14 +315,28 @@ func InitJobQueue() error {
                 return err
             }
         }
-        b := bytes.NewBuffer(line)
-        j := Job{}
-        enc := gob.NewDecoder(b)
-        err = enc.Decode(&j)
+        j := &job{}
+        enc := gob.NewDecoder(bytes.NewBuffer(line))
+        err = enc.Decode(j)
         if err != nil {
             return err
         }
-        JobQueue.Jobs = append(JobQueue.Jobs, j)
+        if j.Status != JobStatusDisable {
+            JobQueue.mu.Lock()
+            JobQueue.Jobs = append(JobQueue.Jobs, j)
+            JobQueue.mu.Unlock()
+        }
     }
+    log.Info("load local job queue finished")
     return nil
+}
+
+// 获取 etcd 存储任务最大序列的 key
+func getMaxJobIdKey() string {
+    return Conf.Name + "/job/max_id"
+}
+
+// 获取添加任务的 etcd 锁 key
+func getAddJobMutexKey() string {
+    return Conf.Name + "/job/add_lock"
 }

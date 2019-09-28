@@ -3,7 +3,6 @@ package core
 import (
     "container/heap"
     "context"
-    "fmt"
     "time"
 )
 
@@ -12,10 +11,11 @@ import (
 type cron struct {
     // 定时任务待执行队列，小顶堆
     Entries *entryHeap
+
+    Cancel context.CancelFunc
 }
 
 var Cron cron
-var CronCancel context.CancelFunc
 
 func NewCron() *cron {
     Cron = cron{Entries: &entryHeap{}}
@@ -23,7 +23,7 @@ func NewCron() *cron {
 }
 
 // 添加定时任务
-func (c *cron) AddJob(j *Job) error {
+func (c *cron) AddJob(j *job) error {
     schedule, err := Parse(j.Spec)
     if err != nil {
         return err
@@ -41,15 +41,15 @@ func (c *cron) AddJob(j *Job) error {
 
 // 启动定时任务
 func (c *cron) Start() {
-    log.Info(Conf.Name, " service is starting...")
+    log.Info(Conf.Name, " service starting...")
     ctx, cancel := context.WithCancel(context.Background())
-    CronCancel = cancel
+    c.Cancel = cancel
 
     // 初始化必要模块
     err := c.initModules(ctx)
     if err != nil {
         log.Error(err)
-        CronCancel()
+        c.Cancel()
     }
 
     log.Info(Conf.Name, " service is working.")
@@ -68,8 +68,7 @@ func (c *cron) Start() {
                 c.Entries.Push(e)
             }
         case <-ctx.Done():
-            fmt.Println(11122)
-            log.Fatal(11111, Conf.Name, " service was stop")
+            log.Fatal(Conf.Name, " service was stop: ", ctx.Err())
             return
         }
     }
@@ -77,7 +76,6 @@ func (c *cron) Start() {
 
 // 初始化必要组件
 func (c *cron) initModules(ctx context.Context) error {
-    log.Info("init modules...")
     // 初始化 etcd
     err := InitEtcd(ctx)
     if err != nil {

@@ -4,57 +4,24 @@ import (
     "context"
     "errors"
     "sync"
-    "time"
 
     "github.com/coreos/etcd/mvcc/mvccpb"
     "github.com/fangzhoou/dcron/utils"
     "go.etcd.io/etcd/clientv3"
 )
 
-// 服务注册 etcd 的租约时间，默认 3 秒
-const LeaseTime = 3
-
-// etcd 服务
-type etcd struct {
-    Status int
-    Cli    *clientv3.Client
-}
-
-var Etcd = &etcd{}
-
-// 初始化 etcd，没有配置 etcd 则服务为单机版
-// 利用 etcd 实现服务发现和服务治理
-func InitEtcd(ctx context.Context) error {
-    // 没有配置 etcd 返回空
-    if len(Conf.EtcdEndpoints) == 0 {
-        return nil
-    }
-
-    cli, err := clientv3.New(clientv3.Config{
-        Endpoints:   Conf.EtcdEndpoints,
-        DialTimeout: 5 * time.Second,
-    })
-    if err != nil {
-        return err
-    }
-    Etcd.Cli = cli
-
-    // 服务注册与监控
-    err = registerAndWatch(ctx)
-    if err != nil {
-        return err
-    }
-    return nil
-}
+const (
+    // 服务注册 etcd 的租约时间，默认 3 秒
+    LeaseTime = 3
+)
 
 // 注册服务及心跳监控
 func registerAndWatch(ctx context.Context) error {
     // 注册服务
-    ip, err := utils.GetLocalIP()
+    s, err := NewServer()
     if err != nil {
         return err
     }
-    s := NewServer(ip)
     err = s.register(ctx)
     if err != nil {
         return err
@@ -62,7 +29,7 @@ func registerAndWatch(ctx context.Context) error {
     go s.keepAlive(ctx)
 
     // 获取所有服务结点
-    m := &master{NodeList: map[string]string{}}
+    m := NewMaster()
     err = m.getNodeList(ctx)
     if err != nil {
         return err
@@ -73,11 +40,6 @@ func registerAndWatch(ctx context.Context) error {
     return nil
 }
 
-// 获取服务节点前缀
-func getNodePrefix() string {
-    return Conf.Name + "/node/"
-}
-
 // 服务对象
 type server struct {
     Name    string
@@ -85,20 +47,25 @@ type server struct {
     LeaseId clientv3.LeaseID
 }
 
-func NewServer(ip string) *server {
-    return &server{Name: utils.Md5(ip), IP: ip}
+func NewServer() (*server, error) {
+    ip, err := utils.GetLocalIP()
+    if err != nil {
+        return nil, err
+    }
+    return &server{Name: utils.Md5(ip), IP: ip}, nil
 }
 
 // 注册服务
 func (s *server) register(ctx context.Context) error {
     // 查看服务是否存在
-    key := Conf.Name + "/node/" + s.Name
+    key := getNodePrefix() + s.Name
     resp, err := Etcd.Cli.Get(ctx, key)
     if err != nil {
         return err
     }
     if resp.Count > 0 {
-        return errors.New(`server "` + key + `"  already registered in etcd`)
+        kv := resp.Kvs[0]
+        return errors.New(`server "` + string(kv.Value) + `" already registered in etcd. key: ` + key)
     }
 
     // 建立 etcd 租约关系
@@ -119,7 +86,7 @@ func (s *server) keepAlive(ctx context.Context) {
     ka, err := Etcd.Cli.KeepAlive(ctx, s.LeaseId)
     if err != nil {
         log.Error(err)
-        CronCancel()
+        Cron.Cancel()
         return
     }
     for {
@@ -129,7 +96,7 @@ func (s *server) keepAlive(ctx context.Context) {
                 _, err := Etcd.Cli.Revoke(ctx, s.LeaseId)
                 if err != nil {
                     log.Error(err)
-                    CronCancel()
+                    Cron.Cancel()
                     return
                 }
             }
@@ -142,6 +109,10 @@ type master struct {
     NodeList map[string]string
 
     mu sync.Mutex
+}
+
+func NewMaster() *master {
+    return &master{NodeList: map[string]string{}}
 }
 
 // 获取服务列表
@@ -164,7 +135,7 @@ func (m *master) watchServers(ctx context.Context) {
         case resp := <-wc:
             if resp.Err() != nil {
                 log.Error(resp.Err())
-                CronCancel()
+                Cron.Cancel()
             }
             for _, ev := range resp.Events {
                 switch ev.Type {
@@ -182,4 +153,9 @@ func (m *master) watchServers(ctx context.Context) {
             }
         }
     }
+}
+
+// 获取服务节点前缀
+func getNodePrefix() string {
+    return Conf.Name + "/node/"
 }

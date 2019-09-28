@@ -43,3 +43,4 @@ func GetRootPath() (string, error) {
     }
     return filepath.Dir(dir), nil
 }
+

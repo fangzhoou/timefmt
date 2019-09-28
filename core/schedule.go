@@ -31,7 +31,7 @@ type Entry struct {
     NextTime time.Time
 
     // 待执行的任务
-    Job *Job
+    Job *job
 }
 
 // 任务清单队列，小顶堆，实现 container/heap
