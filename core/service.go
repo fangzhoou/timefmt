@@ -78,6 +78,7 @@ func (s *server) register(ctx context.Context) error {
     if err != nil {
         return err
     }
+
     return nil
 }
 

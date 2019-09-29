@@ -41,7 +41,7 @@ func (c *cron) AddJob(j *job) error {
 
 // 启动定时任务
 func (c *cron) Start() {
-    log.Info(Conf.Name, " service starting...")
+    log.Info(Conf.Name, "service starting...")
     ctx, cancel := context.WithCancel(context.Background())
     c.Cancel = cancel
 
@@ -51,8 +51,8 @@ func (c *cron) Start() {
         log.Error(err)
         c.Cancel()
     }
+    log.Info(Conf.Name, "service is working.")
 
-    log.Info(Conf.Name, " service is working.")
     // 启动毫秒时钟
     for {
         select {
@@ -68,7 +68,7 @@ func (c *cron) Start() {
                 c.Entries.Push(e)
             }
         case <-ctx.Done():
-            log.Fatal(Conf.Name, " service was stop: ", ctx.Err())
+            log.Fatal(Conf.Name, "service was stop: ", ctx.Err())
             return
         }
     }
@@ -82,8 +82,8 @@ func (c *cron) initModules(ctx context.Context) error {
         return err
     }
 
-    // 初始化任务队列
-    err = InitJobQueue()
+    // 加载本地任务队列
+    err = loadLocalJobs(ctx)
     if err != nil {
         return err
     }

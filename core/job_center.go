@@ -53,8 +53,16 @@ type job struct {
     // 任务执行参数
     Args map[string]interface{}
 
+    // 任务依赖
+    Depend []uint64
+
+    // 执行机器数，单机或多机
+    ExecNum int
+
     // 任务状态
     Status int
+
+    mu sync.Mutex
 }
 
 // 创建 job 对象
@@ -116,24 +124,21 @@ func (jq *jobQueue) Add(ctx context.Context, j *job) error {
         return errors.New(fmt.Sprintf(`job name "%s" already existed`, j.Name))
     }
 
+    // 校验定时任务语法是否正确
+    if _, err := Parse(j.Spec); err != nil {
+        return err
+    }
+
     // 单机版创建新任务
     if Etcd.Cli == nil {
         id, err := jq.getSequenceId(ctx)
         if err != nil {
             return err
         }
-        job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
-        job.Args = j.Args
-        job.Desc = j.Desc
-
-        // 序列化 job 对象到本地存储文件
-        jq.mu.Lock()
-        err = job.serializeAndSave()
+        err = jq.addAndSave(ctx, id, j)
         if err != nil {
             return err
         }
-        jq.Jobs = append(jq.Jobs, job)
-        jq.mu.Unlock()
         return nil
     }
 
@@ -154,22 +159,44 @@ func (jq *jobQueue) Add(ctx context.Context, j *job) error {
         if err != nil {
             return err
         }
-        id := oid + 1
-        job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
-        job.Args = j.Args
-        job.Desc = j.Desc
 
-        // 序列化 job 对象到本地存储文件
-        jq.mu.Lock()
-        err = job.serializeAndSave()
+        // etcd 中的最大任务 id 不能小于当前任务队列的长度
+        if oid < uint64(len(jq.Jobs)) {
+            return errors.New("the max job id in etcd is less then local job queue length")
+        }
+        id := oid + 1
+        err = jq.addAndSave(ctx, id, j)
         if err != nil {
             return err
         }
-        jq.Jobs = append(jq.Jobs, job)
-        jq.mu.Unlock()
         return nil
     }
 
+    return nil
+}
+
+// 添加 job 到队列 JobQueue，并保存到本地
+func (jq *jobQueue) addAndSave(ctx context.Context, id uint64, j *job) error {
+    job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
+    job.Args = j.Args
+    job.Desc = j.Desc
+
+    // 序列化 job 对象到本地存储文件
+    jq.mu.Lock()
+    defer jq.mu.Unlock()
+    err := job.serializeAndSave()
+    if err != nil {
+        return err
+    }
+    jq.Jobs = append(jq.Jobs, job)
+
+    // 更新etcd job/max_id
+    if Etcd.Cli != nil {
+        _, err := Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.FormatUint(id, 10))
+        if err != nil {
+            return err
+        }
+    }
     return nil
 }
 
@@ -285,7 +312,7 @@ var JobQueue = &jobQueue{}
 
 // 初始化 JobQueue
 // 读取本地存储的 job 队列数据
-func InitJobQueue() error {
+func loadLocalJobs(ctx context.Context) error {
     log.Info("load local job queue...")
     fileName, err := getJobStoreFile()
     if err != nil {
@@ -328,6 +355,35 @@ func InitJobQueue() error {
         }
     }
     log.Info("load local job queue finished")
+
+    // 同步 etcd 最大任务id
+    err = updateEtcdMaxJobId(ctx, uint64(len(JobQueue.Jobs)))
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+// 更新 etcd 中保存的最大任务 id
+func updateEtcdMaxJobId(ctx context.Context, id uint64) error {
+    resp, err := Etcd.Cli.Get(ctx, getMaxJobIdKey())
+    if err != nil {
+        return err
+    }
+    if resp.Count > 0 {
+        kv := resp.Kvs[0]
+        oid, err := strconv.ParseUint(string(kv.Value), 10, 64)
+        if err != nil {
+            return err
+        }
+        if oid >= id {
+            return nil
+        }
+    }
+    _, err = Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.FormatUint(id, 10))
+    if err != nil {
+        return err
+    }
     return nil
 }
 
@@ -336,7 +392,7 @@ func getMaxJobIdKey() string {
     return Conf.Name + "/job/max_id"
 }
 
-// 获取添加任务的 etcd 锁 key
+// 获取添加任务时的 etcd 锁 key
 func getAddJobMutexKey() string {
     return Conf.Name + "/job/add_lock"
 }

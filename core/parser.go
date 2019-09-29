@@ -57,8 +57,9 @@ var (
 // Day of week  | Yes        | 0-6 or SUN-SAT  | * / , - ?
 func Parse(spec string) (Schedule, error) {
     if len(spec) == 0 {
-        return nil, fmt.Errorf("Empty spec string")
+        return nil, fmt.Errorf("empty spec string")
     }
+
     // 支持 @ 符，如：@hourly、@yearly、... TODO
     //if spec[0] == '@' {
     //    return nil, nil
@@ -69,7 +70,7 @@ func Parse(spec string) (Schedule, error) {
         bits uint64
         err  error
     )
-    field := func(fd string, b bounds) (uint64) {
+    field := func(fd string, b bounds) uint64 {
         bits, err = parseField(fd, b)
         return bits
     }
@@ -82,15 +83,15 @@ func Parse(spec string) (Schedule, error) {
         dow    = field(fields[5], dow)
     )
     if err != nil {
-        return nil, fmt.Errorf(err.Error())
+        return nil, err
     }
     return &SpecSchedule{
-        second,
-        minute,
-        hour,
-        dom,
-        month,
-        dow,
+        Second: second,
+        Minute: minute,
+        Hour:   hour,
+        Dom:    dom,
+        Month:  month,
+        Dow:    dow,
     }, nil
 }
 
@@ -110,7 +111,7 @@ func parseField(field string, b bounds) (uint64, error) {
     return bits, nil
 }
 
-// 获取需执行的时间节点二进制标记位
+// 获取需执行的时间节点二进制标记位，需要执行的位置 1
 func getBit(expr string, b bounds) (uint64, error) {
     var (
         start, end, step, bit uint64
@@ -136,14 +137,14 @@ func getBit(expr string, b bounds) (uint64, error) {
                 return 0, err
             }
         default:
-            return 0, fmt.Errorf("Too many hyphens: %s", expr)
+            return 0, fmt.Errorf("too many hyphens: %s", expr)
         }
     }
 
     switch len(rangeAndStep) {
-    case 1: // 没有 /
+    case 1: // 没有 '/'
         step = 1
-    case 2: // 有 /
+    case 2: // 有 '/'
         step, err = mustParseInt(rangeAndStep[1])
         if err != nil {
             return 0, err
@@ -152,20 +153,20 @@ func getBit(expr string, b bounds) (uint64, error) {
             end = b.max
         }
     default:
-        return bit, fmt.Errorf("Too many slashes: %s", expr)
+        return bit, fmt.Errorf("too many slashes: %s", expr)
     }
 
     if start < b.min {
-        return 0, fmt.Errorf("Beginning of range (%d) below minimum (%d): %s", start, b.min, expr)
+        return 0, fmt.Errorf("beginning of range (%d) below minimum (%d): %s", start, b.min, expr)
     }
     if end > b.max {
-        return 0, fmt.Errorf("End of range (%d) above maximum (%d): %s", end, b.max, expr)
+        return 0, fmt.Errorf("end of range (%d) above maximum (%d): %s", end, b.max, expr)
     }
     if start > end {
-        return 0, fmt.Errorf("Beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
+        return 0, fmt.Errorf("beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
     }
     if step == 0 {
-        return 0, fmt.Errorf("Step of range should be a positive number: %s", expr)
+        return 0, fmt.Errorf("step of range should be a positive number: %s", expr)
     }
 
     if step == 1 {
@@ -196,10 +197,10 @@ func parseIntOrName(expr string, names map[string]uint64) (uint64, error) {
 func mustParseInt(expr string) (uint64, error) {
     num, err := strconv.Atoi(expr)
     if err != nil {
-        return 0, fmt.Errorf("Failed to parse int from %s: %s", expr, err)
+        return 0, fmt.Errorf("failed to parse int from %s: %s", expr, err)
     }
     if num < 0 {
-        return 0, fmt.Errorf("Negative number (%d) not allowed: %s", num, expr)
+        return 0, fmt.Errorf("negative number (%d) not allowed: %s", num, expr)
     }
     return uint64(num), nil
 }
