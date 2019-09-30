@@ -35,7 +35,6 @@ func (c *cron) AddJob(j *job) error {
         Job:      j,
     }
     heap.Push(c.Entries, e)
-    c.Entries.Push(e)
     return nil
 }
 
@@ -89,6 +88,6 @@ func (c *cron) initModules(ctx context.Context) error {
     }
 
     // 监听 http 服务
-    go ListenAndServe()
+    ListenAndServe()
     return nil
 }

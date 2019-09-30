@@ -99,7 +99,6 @@ func NewEtcdMutex(key string) (*etcdMutex, error) {
 
 // etcd 上锁
 func (em *etcdMutex) Lock() {
-    // if 成功执行
     em.Txn.If(clientv3.Compare(clientv3.CreateRevision(em.Key), "=", 0)).
         Then(clientv3.OpPut(em.Key, "", clientv3.WithLease(em.LeaseId))).
         Else()

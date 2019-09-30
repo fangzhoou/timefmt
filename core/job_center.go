@@ -14,26 +14,30 @@ import (
     "strconv"
     "strings"
     "sync"
-
-    "github.com/fangzhoou/dcron/utils"
 )
 
 const (
-    // 任务状态：关闭 0
-    JobStatusOff int = iota
-    // 任务状态：启用 1
+    // 任务状态：关闭
+    JobStatusOff int = 1 << iota
+    // 任务状态：启用
     JobStatusOn
-    // 任务状态：删除 2
+    // 任务状态：删除
     JobStatusDisable
 
     // job 队列存储文件名
-    JobStoreFileName = "jobqueue"
+    JobStoreFileName string = "job_queue"
+
+    // job 更新内容存储文件名
+    JobUpdateFileName string = "job_update"
+
+    // job 序列化存储的字符串分割符：\0
+    JobSeparator byte = 48
 )
 
 // 任务
 type job struct {
     // 任务 id
-    Id uint64
+    Id int
 
     // 任务名称
     Name string
@@ -54,7 +58,7 @@ type job struct {
     Args map[string]interface{}
 
     // 任务依赖
-    Depend []uint64
+    Depend []int
 
     // 执行机器数，单机或多机
     ExecNum int
@@ -66,13 +70,16 @@ type job struct {
 }
 
 // 创建 job 对象
-func NewJob(id uint64, name, spec, mode, exec string) *job {
+func NewJob(id int, name, spec, mode, exec string) *job {
     return &job{
-        Id:   id,
-        Name: name,
-        Spec: spec,
-        Mode: mode,
-        Exec: exec,
+        Id:      id,
+        Name:    name,
+        Spec:    spec,
+        Mode:    mode,
+        Exec:    exec,
+        Depend:  make([]int, 0),
+        ExecNum: 1,
+        Status:  JobStatusOff, // 默认关闭状态
     }
 }
 
@@ -106,9 +113,9 @@ func (j *job) runHttp() error {
     return nil
 }
 
-// 任务队列
+// 任务队列，存放全量任务
 type jobQueue struct {
-    // 任务队列，存放所有的任务
+    // 任务队列
     Jobs []*job
 
     // 用于存放任务名称，添加任务时判断是否有重名的任务，重名任务不可添加
@@ -122,11 +129,6 @@ func (jq *jobQueue) Add(ctx context.Context, j *job) error {
     // 查看任务队列里是否存在同名任务
     if _, ok := jq.JobsName[j.Name]; ok {
         return errors.New(fmt.Sprintf(`job name "%s" already existed`, j.Name))
-    }
-
-    // 校验定时任务语法是否正确
-    if _, err := Parse(j.Spec); err != nil {
-        return err
     }
 
     // 单机版创建新任务
@@ -154,29 +156,29 @@ func (jq *jobQueue) Add(ctx context.Context, j *job) error {
     if err != nil {
         return err
     }
+    var oid int
     if resp.Count > 0 {
-        oid, err := strconv.ParseUint(string(resp.Kvs[0].Value), 10, 64)
+        oid, err = strconv.Atoi(string(resp.Kvs[0].Value))
         if err != nil {
             return err
         }
 
         // etcd 中的最大任务 id 不能小于当前任务队列的长度
-        if oid < uint64(len(jq.Jobs)) {
+        if oid < len(jq.Jobs) {
             return errors.New("the max job id in etcd is less then local job queue length")
         }
-        id := oid + 1
-        err = jq.addAndSave(ctx, id, j)
-        if err != nil {
-            return err
-        }
-        return nil
     }
 
+    id := oid + 1
+    err = jq.addAndSave(ctx, id, j)
+    if err != nil {
+        return err
+    }
     return nil
 }
 
 // 添加 job 到队列 JobQueue，并保存到本地
-func (jq *jobQueue) addAndSave(ctx context.Context, id uint64, j *job) error {
+func (jq *jobQueue) addAndSave(ctx context.Context, id int, j *job) error {
     job := NewJob(id, j.Name, j.Spec, j.Mode, j.Exec)
     job.Args = j.Args
     job.Desc = j.Desc
@@ -184,7 +186,7 @@ func (jq *jobQueue) addAndSave(ctx context.Context, id uint64, j *job) error {
     // 序列化 job 对象到本地存储文件
     jq.mu.Lock()
     defer jq.mu.Unlock()
-    err := job.serializeAndSave()
+    err := job.serializeAndSave(JobStoreFileName)
     if err != nil {
         return err
     }
@@ -192,7 +194,7 @@ func (jq *jobQueue) addAndSave(ctx context.Context, id uint64, j *job) error {
 
     // 更新etcd job/max_id
     if Etcd.Cli != nil {
-        _, err := Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.FormatUint(id, 10))
+        _, err := Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.Itoa(id))
         if err != nil {
             return err
         }
@@ -204,10 +206,10 @@ func (jq *jobQueue) addAndSave(ctx context.Context, id uint64, j *job) error {
 // id 等于已存在的最大任务 id + 1
 // 集群的任务最大 id 存储在 etcd，key：Conf.name+"max_id"
 // 单机则读取本地任务队列的长度加 1：len(JobQueue) + 1
-func (jq *jobQueue) getSequenceId(ctx context.Context) (uint64, error) {
-    var id uint64
+func (jq *jobQueue) getSequenceId(ctx context.Context) (int, error) {
+    var id int
     if Etcd.Cli == nil {
-        id = uint64(len(jq.Jobs)) + 1
+        id = len(jq.Jobs) + 1
         return id, nil
     }
 
@@ -218,7 +220,7 @@ func (jq *jobQueue) getSequenceId(ctx context.Context) (uint64, error) {
     }
     if resp.Count > 0 {
         kv := resp.Kvs[0]
-        id, err = strconv.ParseUint(string(kv.Value), 10, 64)
+        id, err = strconv.Atoi(string(kv.Value))
         if err != nil {
             return id, err
         }
@@ -229,8 +231,8 @@ func (jq *jobQueue) getSequenceId(ctx context.Context) (uint64, error) {
 }
 
 // 序列化并保存到本地
-func (j *job) serializeAndSave() error {
-    fileName, err := getJobStoreFile()
+func (j *job) serializeAndSave(fName string) error {
+    fileName, err := getStoreFile(fName)
     if err != nil {
         return err
     }
@@ -247,7 +249,7 @@ func (j *job) serializeAndSave() error {
     if err != nil {
         return err
     }
-    buf.WriteByte('\n') // 末尾追加换行
+    buf.WriteByte(JobSeparator) // 末尾追加换行
     _, err = f.Write(buf.Bytes())
     if err != nil {
         return err
@@ -256,9 +258,9 @@ func (j *job) serializeAndSave() error {
 }
 
 // 获取 job 存储文件，文件不存在时创建
-func getJobStoreFile() (string, error) {
+func getStoreFile(fName string) (string, error) {
     // 判断目录是否存在，不存在创建
-    rootPath, err := utils.GetRootPath()
+    rootPath, err := GetRootPath()
     if err != nil {
         return "", err
     }
@@ -276,7 +278,7 @@ func getJobStoreFile() (string, error) {
     }
 
     // 判断文件是否存在，不存在则创建
-    fileName := path.Join(d, JobStoreFileName)
+    fileName := path.Join(d, fName)
     _, err = os.Stat(fileName)
     if err != nil {
         if os.IsNotExist(err) {
@@ -293,8 +295,78 @@ func getJobStoreFile() (string, error) {
     return fileName, nil
 }
 
+// 更新单个任务
+// 除 Id、名称外，其它属性都可更新
+func (jq *jobQueue) UpdateById(id int, p *job) (*job, error) {
+    job, err := jq.FindJobById(id)
+    if err != nil {
+        return nil, err
+    }
+    jq.mu.Lock()
+    defer jq.mu.Unlock()
+
+    // 有值更新，Job 为指针更新会反映到 jobQueue 中
+    if p.Spec != "" {
+        job.Spec = p.Spec
+    }
+    if p.Mode != "" {
+        job.Mode = p.Mode
+    }
+    if p.Exec != "" {
+        job.Exec = p.Exec
+    }
+    if p.Desc != "" {
+        job.Desc = p.Desc
+    }
+    if p.Args != nil {
+        job.Args = p.Args
+    }
+    if len(p.Depend) > 0 {
+        job.Depend = p.Depend
+    }
+    if p.ExecNum > 0 && p.ExecNum != job.ExecNum {
+        job.ExecNum = p.ExecNum
+    }
+    if p.Status != job.Status {
+        job.Status = p.Status
+
+        // 处理任务状态
+        err = handleJobStatusById(job)
+        if err != nil {
+            return nil, err
+        }
+    }
+
+    // 更新内容缓存到本地文件
+    // 另外的线程会去消费这个内容，并同步到全量任务文件中
+    // 更新完成后，更新内容会被删除，控制文件大小
+    err = job.serializeAndSave(JobUpdateFileName)
+    if err != nil {
+        return job, err
+    }
+    return job, nil
+}
+
+// 处理任务状态
+func handleJobStatusById(job *job) error {
+    // 启用时添加到执行队列
+    if job.Status == JobStatusOn {
+        return Cron.AddJob(job)
+    }
+
+    // 暂停或删除时从执行队列中移除包含 job 的执行任务
+    if job.Status == JobStatusOff || job.Status == JobStatusDisable {
+        if b := Cron.Entries.Delete(Entry{Job: job}); b {
+            return nil
+        } else {
+            return fmt.Errorf("delete exec entry job failed, job id:%d", job.Id)
+        }
+    }
+    return nil
+}
+
 // 获取第 i 个任务
-func (jq *jobQueue) GetJobById(i int) (j *job, err error) {
+func (jq *jobQueue) FindJobById(i int) (j *job, err error) {
     if len(jq.Jobs) == 0 {
         err = fmt.Errorf("job queue is empty")
         return
@@ -307,6 +379,21 @@ func (jq *jobQueue) GetJobById(i int) (j *job, err error) {
     return
 }
 
+// 获取 job 列表
+func (jq *jobQueue) FindJobList(page, size int) ([]*job, error) {
+    list := make([]*job, 0)
+    totalPage := len(jq.Jobs)/size + 1
+    if page > totalPage {
+        return nil, fmt.Errorf("find jobs out of range")
+    }
+    if page == totalPage {
+        list = jq.Jobs[(page-1)*size : len(jq.Jobs)]
+    } else {
+        list = jq.Jobs[(page-1)*size : page*size+1]
+    }
+    return list, nil
+}
+
 // 任务队列操作
 var JobQueue = &jobQueue{}
 
@@ -314,7 +401,7 @@ var JobQueue = &jobQueue{}
 // 读取本地存储的 job 队列数据
 func loadLocalJobs(ctx context.Context) error {
     log.Info("load local job queue...")
-    fileName, err := getJobStoreFile()
+    fileName, err := getStoreFile(JobStoreFileName)
     if err != nil {
         return err
     }
@@ -334,7 +421,7 @@ func loadLocalJobs(ctx context.Context) error {
 
     buf := bufio.NewReader(file)
     for {
-        line, err := buf.ReadBytes('\n')
+        line, err := buf.ReadBytes(JobSeparator)
         if err != nil {
             if err == io.EOF {
                 break
@@ -357,7 +444,7 @@ func loadLocalJobs(ctx context.Context) error {
     log.Info("load local job queue finished")
 
     // 同步 etcd 最大任务id
-    err = updateEtcdMaxJobId(ctx, uint64(len(JobQueue.Jobs)))
+    err = updateEtcdMaxJobId(ctx, len(JobQueue.Jobs))
     if err != nil {
         return err
     }
@@ -365,14 +452,14 @@ func loadLocalJobs(ctx context.Context) error {
 }
 
 // 更新 etcd 中保存的最大任务 id
-func updateEtcdMaxJobId(ctx context.Context, id uint64) error {
+func updateEtcdMaxJobId(ctx context.Context, id int) error {
     resp, err := Etcd.Cli.Get(ctx, getMaxJobIdKey())
     if err != nil {
         return err
     }
     if resp.Count > 0 {
         kv := resp.Kvs[0]
-        oid, err := strconv.ParseUint(string(kv.Value), 10, 64)
+        oid, err := strconv.Atoi(string(kv.Value))
         if err != nil {
             return err
         }
@@ -380,7 +467,7 @@ func updateEtcdMaxJobId(ctx context.Context, id uint64) error {
             return nil
         }
     }
-    _, err = Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.FormatUint(id, 10))
+    _, err = Etcd.Cli.Put(ctx, getMaxJobIdKey(), strconv.Itoa(id))
     if err != nil {
         return err
     }

@@ -6,7 +6,6 @@ import (
     "sync"
 
     "github.com/coreos/etcd/mvcc/mvccpb"
-    "github.com/fangzhoou/dcron/utils"
     "go.etcd.io/etcd/clientv3"
 )
 
@@ -48,11 +47,11 @@ type server struct {
 }
 
 func NewServer() (*server, error) {
-    ip, err := utils.GetLocalIP()
+    ip, err := GetLocalIP()
     if err != nil {
         return nil, err
     }
-    return &server{Name: utils.Md5(ip), IP: ip}, nil
+    return &server{Name: Md5(ip), IP: ip}, nil
 }
 
 // 注册服务
