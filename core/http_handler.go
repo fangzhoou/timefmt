@@ -3,17 +3,39 @@ package core
 import (
     "encoding/json"
     "fmt"
-    "github.com/valyala/fasthttp"
-    "regexp"
     "strconv"
-    "strings"
     "unicode/utf8"
+
+    "github.com/buaazp/fasthttprouter"
+    "github.com/valyala/fasthttp"
 )
 
-type Handler struct {
+// 监听 http 服务
+func ListenAndServe() {
+    router := fasthttprouter.New()
+    setRoutes(router)
+    port := strconv.Itoa(Conf.Port)
+    go fasthttp.ListenAndServe(":"+port, router.Handler)
+    log.Info("listening for client requests on localhost:" + port)
 }
 
-// 添加任务
+// 设置路由
+func setRoutes(r *fasthttprouter.Router) {
+    r.POST("/job", addJob)             // 添加任务
+    r.PUT("/job", addJob)              // 添加任务
+    r.PATCH("/job/:id", updateJob)     // 修改任务
+    r.GET("/jobs", findJobs)           // 查询任务列表
+    r.GET("/job/:id", findJobById)     // 查询单个任务
+    r.DELETE("/job/:id", deleteById)   // 删除单个任务
+    r.PUT("/job/:id/on", setJobOn)     // 启动任务
+    r.PUT("/job/:id/off", setJobOff)   // 关闭任务
+    r.GET("/entries", findExecEntries) // 获取正在执行的任务
+    r.PUT("/config", setConfig)        // 设置配置信息
+
+    r.POST("/job/sync", syncData) // 内容结点同步数据接口，禁止外部调用
+}
+
+// 添加 job
 // @param name string 任务名称
 // @param spec string 时间描述
 // @param mode string 执行方式
@@ -22,176 +44,330 @@ type Handler struct {
 // @param depend []uint64 依赖的任务 id
 // @param exec_num int 执行机器数
 // @param desc string 任务描述
-func (h *Handler) addJob(ctx *fasthttp.RequestCtx) {
-    j := &job{}
-    err := json.Unmarshal(ctx.PostBody(), &j)
+func addJob(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    postArgs := ctx.PostArgs()
+    name := string(postArgs.Peek("name"))
+    spec := string(postArgs.Peek("spec"))
+    mode := string(postArgs.Peek("mode"))
+    exec := string(postArgs.Peek("exec"))
+    args := postArgs.Peek("args")
+    depend := postArgs.Peek("depend")
+    execNum := string(postArgs.Peek("exec_num"))
+    desc := string(postArgs.Peek("desc"))
+
+    // 校验参数
+    if name == "" {
+        send(ctx, 400, "param name is required", nil)
+        return
+    }
+    if spec == "" {
+        send(ctx, 400, "param spec is required", nil)
+        return
+    }
+    if mode == "" {
+        send(ctx, 400, "param mode is required", nil)
+        return
+    }
+    if exec == "" {
+        send(ctx, 400, "param exec is required", nil)
+        return
+    }
+    var jobArgs map[string]interface{}
+    if string(args) != "" {
+        err := json.Unmarshal(args, &jobArgs)
+        if err != nil {
+            send(ctx, 400, "param args format error", nil)
+            return
+        }
+    }
+    var jobDepend []int
+    if string(depend) != "" {
+        err := json.Unmarshal(depend, &jobDepend)
+        if err != nil {
+            send(ctx, 400, "param depend format error", nil)
+            return
+        }
+    }
+    var jobExecNum int
+    var err error
+    if execNum != "" {
+        jobExecNum, err = strconv.Atoi(execNum)
+        if err != nil {
+            send(ctx, 400, "param depend format error", nil)
+            return
+        }
+    }
+
+    values := map[string]interface{}{
+        "name":     name,
+        "spec":     spec,
+        "mode":     mode,
+        "exec":     exec,
+        "args":     jobArgs,
+        "depend":   jobDepend,
+        "exec_num": jobExecNum,
+        "desc":     desc,
+    }
+    err = checkJobFields(values)
     if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
-        return
-    }
-    if j.Name == "" {
-        h.send(ctx, 400, "param name is required", nil)
-        return
-    }
-    if j.Spec == "" {
-        h.send(ctx, 400, "param spec is required", nil)
-        return
-    }
-    if j.Mode == "" {
-        h.send(ctx, 400, "param mode is required", nil)
-        return
-    }
-    if j.Exec == "" {
-        h.send(ctx, 400, "param exec is required", nil)
-        return
-    }
-    err = checkJobFields(j)
-    if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
+        send(ctx, 400, err.Error(), nil)
         return
     }
 
-    err = JobQueue.Add(ctx, j)
+    err = JobQueue.Add(ctx, values)
     if err != nil {
-        h.send(ctx, 500, err.Error(), nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    h.send(ctx, 200, "ok", nil)
+    send(ctx, 200, "ok", nil)
     return
 }
 
 // 修改任务
-// @param name string 任务名称
-// @param spec string 时间描述
-// @param mode string 执行方式
-// @param exec string 执行语句
-// @param args map[string]interface{} 附带参数
-// @param depend []uint64 依赖的任务 id
-// @param exec_num int 执行机器数
-// @param desc string 任务描述
-// @param status string 任务状态
-func (h *Handler) updateJob(ctx *fasthttp.RequestCtx, id int) {
-    j := &job{}
-    err := json.Unmarshal(ctx.PostBody(), &j)
+func updateJob(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    id, err := strconv.Atoi(ctx.UserValue("id").(string))
     if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    log.Debug(j)
-    err = checkJobFields(j)
+
+    // 更新的参数
+    postArgs := ctx.PostArgs()
+    name := string(postArgs.Peek("name"))
+    spec := string(postArgs.Peek("spec"))
+    mode := string(postArgs.Peek("mode"))
+    exec := string(postArgs.Peek("exec"))
+    args := postArgs.Peek("args")
+    depend := postArgs.Peek("depend")
+    execNum := string(postArgs.Peek("exec_num"))
+    desc := string(postArgs.Peek("desc"))
+    var jobArgs map[string]interface{}
+    if string(args) != "" {
+        err := json.Unmarshal(args, &jobArgs)
+        if err != nil {
+            send(ctx, 400, "param args format error", nil)
+            return
+        }
+    }
+    var jobDepend []int
+    if string(depend) != "" {
+        err := json.Unmarshal(depend, &jobDepend)
+        if err != nil {
+            send(ctx, 400, "param depend format error", nil)
+            return
+        }
+    }
+    var jobExecNum int
+    if execNum != "" {
+        jobExecNum, err = strconv.Atoi(execNum)
+        if err != nil {
+            send(ctx, 400, "param depend format error", nil)
+            return
+        }
+    }
+
+    values := map[string]interface{}{
+        "name":     name,
+        "spec":     spec,
+        "mode":     mode,
+        "exec":     exec,
+        "args":     jobArgs,
+        "depend":   jobDepend,
+        "exec_num": jobExecNum,
+        "desc":     desc,
+    }
+    err = checkJobFields(values)
     if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
+        send(ctx, 400, err.Error(), nil)
         return
     }
-    job, err := JobQueue.UpdateById(id, j)
+    job, err := JobQueue.UpdateById(id, values)
     if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    h.send(ctx, 200, "ok", job)
+    send(ctx, 200, "ok", job)
     return
 }
 
-// 删除任务
-func (h *Handler) delJob(ctx *fasthttp.RequestCtx, id int) {
-    j := &job{Status: JobStatusDisable}
-    job, err := JobQueue.UpdateById(id, j)
+// 查询任务列表
+func findJobs(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    var page, size int
+    var err error
+    queryArgs := ctx.QueryArgs()
+    p := string(queryArgs.Peek("page"))
+    s := string(queryArgs.Peek("size"))
+    if p != "" {
+        page, err = strconv.Atoi(p)
+        if err != nil {
+            send(ctx, 500, err.Error(), nil)
+            return
+        }
+    }
+    if s != "" {
+        size, err = strconv.Atoi(s)
+        if err != nil {
+            send(ctx, 500, err.Error(), nil)
+            return
+        }
+    }
+    if page < 1 {
+        page = 1
+    }
+    if size < 1 {
+        size = 1
+    }
+    result, err := JobQueue.FindJobList(page, size)
     if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    h.send(ctx, 200, "ok", job)
+    send(ctx, 200, "", result)
     return
 }
 
 // 查询单个任务
-func (h *Handler) findJob(ctx *fasthttp.RequestCtx, id int) {
+func findJobById(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    id, err := strconv.Atoi(ctx.UserValue("id").(string))
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
     job, err := JobQueue.FindJobById(id)
     if err != nil {
-        h.send(ctx, 500, err.Error(), nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    h.send(ctx, 200, "", job)
+    send(ctx, 200, "", job)
     return
 }
 
-// 查询多个任务
-// @param page int
-// @param size int 默认 10
-func (h *Handler) findJobs(ctx *fasthttp.RequestCtx) {
-    page := 1
-    size := 10
-    if len(ctx.PostBody()) > 0 {
-        args := map[string]string{}
-        err := json.Unmarshal(ctx.PostBody(), &args)
+// 删除单个任务
+func deleteById(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    id, err := strconv.Atoi(ctx.UserValue("id").(string))
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    err = JobQueue.DeleteById(id)
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    send(ctx, 200, "ok", nil)
+    return
+}
+
+// 启动任务
+func setJobOn(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    id, err := strconv.Atoi(ctx.UserValue("id").(string))
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    values := map[string]interface{}{
+        "status": JobStatusOn,
+    }
+    job, err := JobQueue.UpdateById(id, values)
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    send(ctx, 200, "ok", job)
+    return
+}
+
+// 关闭任务
+func setJobOff(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    id, err := strconv.Atoi(ctx.UserValue("id").(string))
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    values := map[string]interface{}{
+        "status": JobStatusOff,
+    }
+    job, err := JobQueue.UpdateById(id, values)
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    send(ctx, 200, "ok", job)
+    return
+}
+
+// 获取正在执行的任务列表
+func findExecEntries(ctx *fasthttp.RequestCtx) {
+    ctx.SetContentType("text/html")
+    var page, size int
+    var err error
+    queryArgs := ctx.QueryArgs()
+    p := string(queryArgs.Peek("page"))
+    s := string(queryArgs.Peek("size"))
+    if p != "" {
+        page, err = strconv.Atoi(p)
         if err != nil {
-            h.send(ctx, 400, err.Error(), nil)
+            send(ctx, 500, err.Error(), nil)
             return
         }
-        if args["page"] != "" {
-            p, err := strconv.Atoi(args["page"])
-            if err != nil {
-                h.send(ctx, 400, err.Error(), nil)
-                return
-            }
-            if p > 0 {
-                page = p
-            }
-        }
-        if args["size"] != "" {
-            s, err := strconv.Atoi(args["size"])
-            if err != nil {
-                h.send(ctx, 400, err.Error(), nil)
-                return
-            }
-            if s > 0 {
-                size = s
-            }
+    }
+    if s != "" {
+        size, err = strconv.Atoi(s)
+        if err != nil {
+            send(ctx, 500, err.Error(), nil)
+            return
         }
     }
-
-    result, err := JobQueue.FindJobList(page, size)
+    if page < 1 {
+        page = 1
+    }
+    if size < 1 {
+        size = 1
+    }
+    result, err := Cron.FindEntries(page, size)
     if err != nil {
-        // 当前页没有数据
-        h.send(ctx, 200, "no data", nil)
+        send(ctx, 500, err.Error(), nil)
         return
     }
-    h.send(ctx, 200, "", result)
+    send(ctx, 200, "", result)
     return
 }
 
-// 开启某个任务
-func (h *Handler) setJobOn(ctx *fasthttp.RequestCtx, id int) {
-    j := &job{Status: JobStatusOn}
-    job, err := JobQueue.UpdateById(id, j)
-    if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
-        return
-    }
-    h.send(ctx, 200, "ok", job)
-    return
+// 设置配置
+func setConfig(ctx *fasthttp.RequestCtx) {
+
 }
 
-// 暂停某个任务
-func (h *Handler) setJobOff(ctx *fasthttp.RequestCtx, id int) {
-    j := &job{Status: JobStatusOff}
-    job, err := JobQueue.UpdateById(id, j)
-    if err != nil {
-        h.send(ctx, 400, err.Error(), nil)
-        return
+// 校验 job 字段参数是否正确
+func checkJobFields(v map[string]interface{}) error {
+    if v["name"].(string) != "" && utf8.RuneCountInString(v["name"].(string)) > 20 {
+        return fmt.Errorf("job name must be less or equal then 20 rune")
     }
-    h.send(ctx, 200, "ok", job)
-    return
-}
+    if v["exec"].(string) != "" && utf8.RuneCountInString(v["exec"].(string)) > 100 {
+        return fmt.Errorf("job exec must be less or equal then 100 rune")
+    }
+    if v["desc"].(string) != "" && utf8.RuneCountInString(v["desc"].(string)) > 255 {
+        return fmt.Errorf("job exec must be less or equal then 255 rune")
+    }
 
-// 404 路由未找到
-func (h *Handler) notFound(ctx *fasthttp.RequestCtx) {
-    h.send(ctx, 404, "page not found", nil)
-    return
+    // 校验定时任务语法是否正确
+    if v["spec"].(string) != "" {
+        if _, err := Parse(v["spec"].(string)); err != nil {
+            return fmt.Errorf("spec parse error: " + err.Error())
+        }
+    }
+    return nil
 }
 
 // http 响应输出
-func (h *Handler) send(ctx *fasthttp.RequestCtx, status int, msg string, data interface{}) {
+func send(ctx *fasthttp.RequestCtx, status int, msg string, data interface{}) {
     rep := map[string]interface{}{}
     ctx.SetStatusCode(status)
     rep["status"] = status
@@ -208,119 +384,7 @@ func (h *Handler) send(ctx *fasthttp.RequestCtx, status int, msg string, data in
     fmt.Fprintf(ctx, string(res))
 }
 
-// 处理 http 请求
-// 提供对外 http RESTFul 接口，地址：0.0.0.0:port
-// /job [post/put] 添加任务
-// /job [get] 获取任务列表
-// /job/{id} [get] 获取单个任务
-// /job/{id} [patch] 修改单个任务属性
-// /job/{id} [delete] 删除单个任务
-// /job/{id}/on [put/patch] 开启任务
-// /job/{id}/off [put/patch] 关闭任务
-func (h *Handler) HandleFastHttp(ctx *fasthttp.RequestCtx) {
-    method := strings.ToLower(string(ctx.Method()))
-    log.Debug(string(ctx.Path()), method, string(ctx.PostBody()))
-    switch string(ctx.Path()) {
-    case "/job":
-        // 处理不同请求方式
-        switch method {
+// 结点内部数据同步接口
+func syncData(ctx *fasthttp.RequestCtx) {
 
-        // get 获取任务列表
-        case "get":
-            h.findJobs(ctx)
-
-        // post，put 新增任务
-        case "post", "put":
-            h.addJob(ctx)
-
-        // 404
-        default:
-            h.notFound(ctx)
-        }
-    default:
-        p := string(ctx.Path())
-        b, _ := regexp.MatchString("^/job/\\d+$", p)
-        if b {
-            sp := strings.Split(p, "/")
-            id, err := strconv.Atoi(sp[len(sp)-1])
-            if err != nil {
-                h.send(ctx, 400, err.Error(), nil)
-            }
-
-            switch method {
-
-            // /job/{id} get 获取单个任务
-            case "get":
-                h.findJob(ctx, id)
-
-            // /job/{id} patch 修改单个任务
-            case "patch":
-                h.updateJob(ctx, id)
-
-            // /job/{id} delete 删除单个任务
-            case "delete":
-                h.delJob(ctx, id)
-
-            // 404
-            default:
-                h.notFound(ctx)
-            }
-        } else {
-            // /job/{id}/on [put/patch] 启用任务
-            if b, _ := regexp.MatchString("^/job/\\d+/on$", p); b {
-                sp := strings.Split(p, "/")
-                id, err := strconv.Atoi(sp[len(sp)-2])
-                if err != nil {
-                    h.send(ctx, 400, err.Error(), nil)
-                }
-                h.setJobOn(ctx, id)
-            } else if b, _ := regexp.MatchString("^/job/\\d+/off$", p); b {
-                // /job/{id}/off [put/patch] 停止任务
-                sp := strings.Split(p, "/")
-                id, err := strconv.Atoi(sp[len(sp)-2])
-                if err != nil {
-                    h.send(ctx, 400, err.Error(), nil)
-                }
-                h.setJobOff(ctx, id)
-            } else {
-                h.notFound(ctx)
-            }
-            //h.notFound(ctx)
-        }
-    }
-}
-
-// 校验 job 字段参数是否正确
-func checkJobFields(j *job) error {
-    if utf8.RuneCountInString(j.Name) > 20 {
-        return fmt.Errorf("job name must be less or equal then 20 rune")
-    }
-    if utf8.RuneCountInString(j.Exec) > 100 {
-        return fmt.Errorf("job exec must be less or equal then 100 rune")
-    }
-    if utf8.RuneCountInString(j.Desc) > 255 {
-        return fmt.Errorf("job exec must be less or equal then 255 rune")
-    }
-    if j.Status != 0 &&
-        j.Status != JobStatusOn &&
-        j.Status != JobStatusOff &&
-        j.Status != JobStatusDisable {
-        return fmt.Errorf("invalid job status value")
-    }
-
-    // 校验定时任务语法是否正确
-    if j.Spec != "" {
-        if _, err := Parse(j.Spec); err != nil {
-            return fmt.Errorf("spec parse error: " + err.Error())
-        }
-    }
-    return nil
-}
-
-// 监听并提供 http 服务
-func ListenAndServe() {
-    h := &Handler{}
-    port := strconv.Itoa(Conf.Port)
-    go fasthttp.ListenAndServe(":"+port, h.HandleFastHttp)
-    log.Info("listening for client requests on localhost:" + port)
 }

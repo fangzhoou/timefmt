@@ -2,6 +2,9 @@ package core
 
 import (
     "container/heap"
+    "context"
+    "encoding/json"
+    "fmt"
     "time"
 )
 
@@ -31,60 +34,139 @@ type Entry struct {
 
     // 待执行的任务
     Job *job
+
+    // 执行状态
+    Status int
+
+    // 堆中的索引位置
+    index int
+
+    // 任务是否结束
+    fin chan bool
+}
+
+// 任务运行后存储在 etcd 中的数据
+type runEntry struct {
+    Ip       string
+    PrevTime time.Time
+    NextTime time.Time
+    JobId    int
+}
+
+// 运行任务
+// 运行的任务写入 etcd，通过 etcd 查询正在运行的任务
+func (e *Entry) Run(ctx context.Context) {
+    t := time.Now()
+    e.Job.run(e.fin)
+    e.PrevTime = t
+    e.NextTime = e.Schedule.Next(t)
+    e.Status = StatusExecuting
+
+    // 写入 etcd
+    ip, err := GetLocalIP()
+    if err != nil {
+        log.Error(err)
+        Cron.Cancel()
+    }
+    values := &runEntry{
+        Ip:       ip,
+        PrevTime: e.PrevTime,
+        NextTime: e.NextTime,
+        JobId:    e.Job.Id,
+    }
+    valueStr, err := json.Marshal(values)
+    if err != nil {
+        log.Error(err)
+        Cron.Cancel()
+    }
+    _, err = Etcd().Cli.Put(ctx, getRunEntryKey(e.Job.Id), string(valueStr))
+    if err != nil {
+        log.Error(err)
+        Cron.Cancel()
+    }
+    go func(e *Entry) {
+        for {
+            select {
+            case b := <-e.fin:
+                // 运行结束，删除 etcd 中的值
+                if b {
+                    e.Status = StatusWaiting
+                    _, err := Etcd().Cli.Delete(ctx, getRunEntryKey(e.Job.Id))
+                    if err != nil {
+                        log.Error(err)
+                        Cron.Cancel()
+                    }
+                }
+            }
+        }
+    }(e)
+}
+
+// 执行中的任务 key
+func getRunEntryKey(id int) string {
+    return fmt.Sprintf("%s%d", getRunEntryPrefix(), id)
+}
+
+// 执行中的任务 key 前缀
+func getRunEntryPrefix() string {
+    return fmt.Sprintf("%s/entries/", Conf.Name)
 }
 
 // 任务清单队列，小顶堆，实现 container/heap
-type entryHeap []*Entry
+type entryQueue []*Entry
 
-func (h entryHeap) Len() int { return len(h) }
+func (q entryQueue) Len() int { return len(q) }
 
-func (h entryHeap) Less(i, j int) bool {
-    return h[i].NextTime.UnixNano() < h[j].NextTime.UnixNano()
+func (q entryQueue) Less(i, j int) bool {
+    return q[i].NextTime.UnixNano() < q[j].NextTime.UnixNano()
 }
 
-func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (q entryQueue) Swap(i, j int) {
+    q[i], q[j] = q[j], q[i]
+    q[i].index = i
+    q[j].index = j
+}
 
 // 添加元素
-func (h *entryHeap) Push(x interface{}) {
+func (q *entryQueue) Push(x interface{}) {
     // 使用指针（*h）操作堆，因为操作需要反应到原切片里
-    *h = append(*h, x.(*Entry))
+    n := len(*q)
+    item := x.(*Entry)
+    item.index = n
+    *q = append(*q, item)
 }
 
 // 移除首个元素
-func (h *entryHeap) Pop() interface{} {
-    x := (*h)[0]
-    n := len(*h)
-    *h = (*h)[1:n]
-    return x
+func (q *entryQueue) Pop() interface{} {
+    old := *q
+    n := len(old)
+    item := old[0]
+    item.index = -1
+    *q = old[1:n]
+    return item
 }
 
 // 获取堆中首个元素
 // entryHeap.First()
-func (h *entryHeap) First() *Entry {
-    if len(*h) > 0 {
-        return (*h)[0]
+func (q *entryQueue) First() *Entry {
+    if len(*q) > 0 {
+        e := q.Pop()
+        q.Push(e)
+        return e.(*Entry)
     }
     return nil
 }
 
+// 更新元素
+func (q *entryQueue) Update(item *Entry, nextTime time.Time, job *job) {
+    item.NextTime = nextTime
+    item.Job = job
+    heap.Fix(q, item.index)
+}
+
 // 删除指定元素
 // entryHeap.Delete(entry)
-func (h *entryHeap) Delete(e Entry) bool {
-    var find bool
-    var i int
-    for k, v := range *h {
-        if v.Job.Id == e.Job.Id {
-            i = k
-            find = true
-            break
-        }
-    }
-
-    // 没找到，则说明要删除的元素不在执行队列中
-    if !find {
-        return true
-    }
-
-    heap.Remove(h, i)
+func (q *entryQueue) Delete(item Entry) bool {
+    heap.Remove(q, item.index)
     return true
 }

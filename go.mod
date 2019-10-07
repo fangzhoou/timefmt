@@ -4,6 +4,7 @@ go 1.12
 
 require (
 	github.com/BurntSushi/toml v0.3.1
+	github.com/buaazp/fasthttprouter v0.1.1
 	github.com/coreos/bbolt v1.3.3 // indirect
 	github.com/coreos/etcd v3.3.15+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect

@@ -2,6 +2,7 @@ package core
 
 import (
     "context"
+    "sync"
     "time"
 
     "go.etcd.io/etcd/clientv3"
@@ -16,35 +17,40 @@ const (
 )
 
 // etcd 服务
-type etcd struct {
+type etcdClient struct {
     Cli *clientv3.Client
 }
 
-var Etcd = &etcd{}
+var (
+    etcd etcdClient
+    once sync.Once
+)
+
+// 获取 etcd client
+func Etcd() *etcdClient {
+    if etcd.Cli == nil {
+        InitEtcd()
+    }
+    return &etcd
+}
 
 // 初始化 etcd，没有配置 etcd 则服务为单机版
 // 利用 etcd 实现服务发现和服务治理
-func InitEtcd(ctx context.Context) error {
-    // 没有配置 etcd 返回空
-    if len(Conf.EtcdEndpoints) == 0 {
-        return nil
-    }
+func InitEtcd() {
+    once.Do(func() {
+        if len(Conf.EtcdEndpoints) == 0 {
+            log.Fatal("etcd config is required")
+        }
 
-    cli, err := clientv3.New(clientv3.Config{
-        Endpoints:   Conf.EtcdEndpoints,
-        DialTimeout: DialTimeOut,
+        cli, err := clientv3.New(clientv3.Config{
+            Endpoints:   Conf.EtcdEndpoints,
+            DialTimeout: DialTimeOut,
+        })
+        if err != nil {
+            log.Fatal(err)
+        }
+        etcd.Cli = cli
     })
-    if err != nil {
-        return err
-    }
-    Etcd.Cli = cli
-
-    // 服务注册与监控
-    err = registerAndWatch(ctx)
-    if err != nil {
-        return err
-    }
-    return nil
 }
 
 // etcd 互斥锁

@@ -58,7 +58,7 @@ func NewServer() (*server, error) {
 func (s *server) register(ctx context.Context) error {
     // 查看服务是否存在
     key := getNodePrefix() + s.Name
-    resp, err := Etcd.Cli.Get(ctx, key)
+    resp, err := Etcd().Cli.Get(ctx, key)
     if err != nil {
         return err
     }
@@ -68,12 +68,12 @@ func (s *server) register(ctx context.Context) error {
     }
 
     // 建立 etcd 租约关系
-    gResp, err := Etcd.Cli.Grant(ctx, LeaseTime)
+    gResp, err := Etcd().Cli.Grant(ctx, LeaseTime)
     if err != nil {
         return err
     }
     s.LeaseId = gResp.ID
-    _, err = Etcd.Cli.Put(ctx, getNodePrefix()+s.Name, s.IP, clientv3.WithLease(s.LeaseId))
+    _, err = Etcd().Cli.Put(ctx, getNodePrefix()+s.Name, s.IP, clientv3.WithLease(s.LeaseId))
     if err != nil {
         return err
     }
@@ -83,7 +83,7 @@ func (s *server) register(ctx context.Context) error {
 
 // 服务心跳
 func (s *server) keepAlive(ctx context.Context) {
-    ka, err := Etcd.Cli.KeepAlive(ctx, s.LeaseId)
+    ka, err := Etcd().Cli.KeepAlive(ctx, s.LeaseId)
     if err != nil {
         log.Error(err)
         Cron.Cancel()
@@ -93,7 +93,7 @@ func (s *server) keepAlive(ctx context.Context) {
         select {
         case re := <-ka:
             if re == nil {
-                _, err := Etcd.Cli.Revoke(ctx, s.LeaseId)
+                _, err := Etcd().Cli.Revoke(ctx, s.LeaseId)
                 if err != nil {
                     log.Error(err)
                     Cron.Cancel()
@@ -117,7 +117,7 @@ func NewMaster() *master {
 
 // 获取服务列表
 func (m *master) getNodeList(ctx context.Context) error {
-    resp, err := Etcd.Cli.Get(ctx, getNodePrefix(), clientv3.WithPrefix())
+    resp, err := Etcd().Cli.Get(ctx, getNodePrefix(), clientv3.WithPrefix())
     if err != nil {
         return err
     }
@@ -129,7 +129,7 @@ func (m *master) getNodeList(ctx context.Context) error {
 
 // 监控服务列表，服务节点有变动时更新
 func (m *master) watchServers(ctx context.Context) {
-    wc := Etcd.Cli.Watch(ctx, getNodePrefix(), clientv3.WithPrefix())
+    wc := Etcd().Cli.Watch(ctx, getNodePrefix(), clientv3.WithPrefix())
     for {
         select {
         case resp := <-wc:

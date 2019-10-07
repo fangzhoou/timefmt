@@ -4,7 +4,11 @@ import (
     "github.com/fangzhoou/dcron/core"
 )
 
-func main() {
+func init() {
     core.LoadConfig()
+    core.InitEtcd()
+}
+
+func main() {
     core.NewCron().Start()
 }

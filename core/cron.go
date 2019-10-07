@@ -3,6 +3,8 @@ package core
 import (
     "container/heap"
     "context"
+    "encoding/json"
+    "go.etcd.io/etcd/clientv3"
     "time"
 )
 
@@ -10,7 +12,7 @@ import (
 // 管理、调度任务队列
 type cron struct {
     // 定时任务待执行队列，小顶堆
-    Entries *entryHeap
+    Entries *entryQueue
 
     Cancel context.CancelFunc
 }
@@ -18,7 +20,7 @@ type cron struct {
 var Cron cron
 
 func NewCron() *cron {
-    Cron = cron{Entries: &entryHeap{}}
+    Cron = cron{Entries: &entryQueue{}}
     return &Cron
 }
 
@@ -30,24 +32,54 @@ func (c *cron) AddJob(j *job) error {
     }
     e := &Entry{
         Schedule: schedule,
-        PrevTime: time.Time{},
         NextTime: schedule.Next(time.Now()),
         Job:      j,
     }
     heap.Push(c.Entries, e)
+    log.Debug("test add :", c.Entries)
     return nil
+}
+
+type runJob struct {
+    runEntry
+    job *job
+}
+
+// 获取正在执行的任务
+func (c *cron) FindEntries(page, size int) ([]*runJob, error) {
+    list := make([]*runJob, 0)
+    resp, err := Etcd().Cli.Get(context.TODO(), getRunEntryPrefix(), clientv3.WithPrefix())
+    if err != nil {
+        return list, err
+    }
+
+    //i := 0 TODO
+    for _, kv := range resp.Kvs {
+        v := runEntry{}
+        err = json.Unmarshal(kv.Value, &v)
+        if err != nil {
+            return list, err
+        }
+        id := 1
+        j, err := JobQueue.FindJobById(id) // Cron.Entries[v.]
+        if err != nil {
+            return list, err
+        }
+        re := &runJob{v, j}
+        list = append(list, re)
+    }
+    return list, nil
 }
 
 // 启动定时任务
 func (c *cron) Start() {
     log.Info(Conf.Name, "service starting...")
-    ctx, cancel := context.WithCancel(context.Background())
-    c.Cancel = cancel
+    var ctx context.Context
+    ctx, c.Cancel = context.WithCancel(context.Background())
 
     // 初始化必要模块
-    err := c.initModules(ctx)
+    err := initModules(ctx)
     if err != nil {
-        log.Error(err)
         c.Cancel()
     }
     log.Info(Conf.Name, "service is working.")
@@ -56,27 +88,28 @@ func (c *cron) Start() {
     for {
         select {
         case <-time.After(100 * time.Millisecond):
-            // 任务队列为小顶堆，每次都读取根结点，比较下次执行时间
-            entry := c.Entries.First()
-            t := time.Now()
-            if entry != nil && t.After(entry.NextTime) {
-                e := heap.Pop(c.Entries)
-                e.(*Entry).Job.run()
-                e.(*Entry).PrevTime = t
-                e.(*Entry).NextTime = e.(*Entry).Schedule.Next(t)
-                c.Entries.Push(e)
+            // 同一时间可能有多个任务需要执行
+            for {
+                if entry := c.Entries.First(); entry != nil && time.Now().After(entry.NextTime) {
+                    e := heap.Pop(c.Entries)
+                    e.(*Entry).Run(ctx)
+                    heap.Push(c.Entries, e)
+                } else {
+                    break
+                }
             }
+
         case <-ctx.Done():
-            log.Fatal(Conf.Name, "service was stop: ", ctx.Err())
+            log.Fatal(Conf.Name, "service was stop:", ctx.Err())
             return
         }
     }
 }
 
 // 初始化必要组件
-func (c *cron) initModules(ctx context.Context) error {
-    // 初始化 etcd
-    err := InitEtcd(ctx)
+func initModules(ctx context.Context) error {
+    // 服务注册与监控
+    err := registerAndWatch(ctx)
     if err != nil {
         return err
     }

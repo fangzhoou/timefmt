@@ -7,6 +7,9 @@ import (
     "path/filepath"
 )
 
+// 默认 http 服务端口
+const DefaultPort int = 7777
+
 // 配置文件
 type config struct {
     // 应用名称
@@ -22,7 +25,12 @@ type config struct {
     EtcdEndpoints []string `toml:"etcd_endpoints"`
 }
 
-var Conf config
+var Conf = config{
+    Name:          "dcron",
+    Port:          DefaultPort,
+    Storage:       "",
+    EtcdEndpoints: []string{"127.0.0.1:2379"},
+}
 
 // 加载配置文件
 func LoadConfig() {
@@ -38,6 +46,7 @@ func LoadConfig() {
     if err != nil {
         panic(err)
     }
+
     tomlData, err := ioutil.ReadFile(confFile)
     if err != nil {
         panic(err)
