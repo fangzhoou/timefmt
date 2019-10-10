@@ -30,7 +30,6 @@ func setRoutes(r *fasthttprouter.Router) {
     r.PUT("/job/:id/on", setJobOn)     // 启动任务
     r.PUT("/job/:id/off", setJobOff)   // 关闭任务
     r.GET("/entries", findExecEntries) // 获取正在执行的任务
-    r.PUT("/config", setConfig)        // 设置配置信息
 
     r.POST("/job/sync", syncData) // 内容结点同步数据接口，禁止外部调用
 }
@@ -340,11 +339,6 @@ func findExecEntries(ctx *fasthttp.RequestCtx) {
     return
 }
 
-// 设置配置
-func setConfig(ctx *fasthttp.RequestCtx) {
-
-}
-
 // 校验 job 字段参数是否正确
 func checkJobFields(v map[string]interface{}) error {
     if v["name"].(string) != "" && utf8.RuneCountInString(v["name"].(string)) > 20 {
@@ -386,5 +380,13 @@ func send(ctx *fasthttp.RequestCtx, status int, msg string, data interface{}) {
 
 // 结点内部数据同步接口
 func syncData(ctx *fasthttp.RequestCtx) {
-
+    ctx.SetContentType("text/html")
+    body := ctx.PostBody()
+    err := JobQueue.SyncJob(ctx, body)
+    if err != nil {
+        send(ctx, 500, err.Error(), nil)
+        return
+    }
+    send(ctx, 200, "ok", nil)
+    return
 }

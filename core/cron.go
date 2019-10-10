@@ -42,10 +42,11 @@ func (c *cron) AddJob(j *job) error {
 
 type runJob struct {
     runEntry
-    job *job
+    Job *job
 }
 
 // 获取正在执行的任务
+// 正在执行的任务是动态变化的，当前页显示有数据，可能下一秒就没有了
 func (c *cron) FindEntries(page, size int) ([]*runJob, error) {
     list := make([]*runJob, 0)
     resp, err := Etcd().Cli.Get(context.TODO(), getRunEntryPrefix(), clientv3.WithPrefix())
@@ -53,20 +54,21 @@ func (c *cron) FindEntries(page, size int) ([]*runJob, error) {
         return list, err
     }
 
-    //i := 0 TODO
-    for _, kv := range resp.Kvs {
-        v := runEntry{}
-        err = json.Unmarshal(kv.Value, &v)
-        if err != nil {
-            return list, err
+    for k, kv := range resp.Kvs {
+        if k >= (page-1)*size && k < page*size {
+            v := runEntry{}
+            err = json.Unmarshal(kv.Value, &v)
+            if err != nil {
+                return list, err
+            }
+            id := 1
+            j, err := JobQueue.FindJobById(id) // Cron.Entries[v.]
+            if err != nil {
+                return list, err
+            }
+            re := &runJob{v, j}
+            list = append(list, re)
         }
-        id := 1
-        j, err := JobQueue.FindJobById(id) // Cron.Entries[v.]
-        if err != nil {
-            return list, err
-        }
-        re := &runJob{v, j}
-        list = append(list, re)
     }
     return list, nil
 }

@@ -12,6 +12,7 @@ import (
     "go.etcd.io/etcd/clientv3"
     "io"
     "io/ioutil"
+    "math"
     "net/http"
     "os"
     "os/exec"
@@ -138,7 +139,6 @@ func (j *job) runShell(fin chan bool) error {
         return err
     }
     fin <- true
-    log.Debug(111, j.Name)
     return nil
 }
 
@@ -171,24 +171,10 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
         return err
     }
     em.Lock()
-    resp, err := Etcd().Cli.Get(ctx, getMaxJobIdKey())
+    id, err := jq.getSequenceId(ctx)
     if err != nil {
         return err
     }
-    var oid int
-    if resp.Count > 0 {
-        oid, err = strconv.Atoi(string(resp.Kvs[0].Value))
-        if err != nil {
-            return err
-        }
-
-        // etcd 中的最大任务 id 不能小于当前任务队列的长度
-        if oid < len(jq.Jobs) {
-            return errors.New("the max job id in etcd is less then local job queue length")
-        }
-    }
-
-    id := oid + 1
     job := NewJob(id, p)
     err = jq.addAndSave(ctx, job)
     if err != nil {
@@ -212,12 +198,8 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
 
 // 更新其它结点数据
 func updateOtherNodeJob(ctx context.Context, j *job) error {
-    jobItem, err := json.Marshal(*j)
-    if err != nil {
-        return err
-    }
     master := NewMaster()
-    err = master.getNodeList(ctx)
+    err := master.getNodeList(ctx)
     if err != nil {
         return err
     }
@@ -226,12 +208,16 @@ func updateOtherNodeJob(ctx context.Context, j *job) error {
         return err
     }
     // 移除当前结点
-    delete(master.NodeList, curServer.Name)
+    delete(master.NodeList, getNodePrefix()+curServer.Name)
 
+    jobItem, err := json.Marshal(*j)
+    if err != nil {
+        return err
+    }
     nodeNum := len(master.NodeList)
     req := make(chan bool, nodeNum)
     for _, ip := range master.NodeList {
-        url := fmt.Sprintf("http://%s/job/sync", ip)
+        url := fmt.Sprintf("http://%s:%d/job/sync", ip, Conf.Port)
         body := bytes.NewReader([]byte(jobItem))
         go postToOtherNode(req, url, body)
     }
@@ -272,29 +258,14 @@ func (jq *jobQueue) addAndSave(ctx context.Context, j *job) error {
         return err
     }
     jq.Jobs = append(jq.Jobs, j)
-
-    // 更新etcd job/max_id
-    if Etcd().Cli != nil {
-        _, err := Etcd().Cli.Put(ctx, getMaxJobIdKey(), strconv.Itoa(j.Id))
-        if err != nil {
-            return err
-        }
-    }
     return nil
 }
 
 // 获取 job id
 // id 等于已存在的最大任务 id + 1
 // 集群的任务最大 id 存储在 etcd，key：Conf.name+"max_id"
-// 单机则读取本地任务队列的长度加 1：len(JobQueue) + 1
 func (jq *jobQueue) getSequenceId(ctx context.Context) (int, error) {
     var id int
-    if Etcd().Cli == nil {
-        id = len(jq.Jobs) + 1
-        return id, nil
-    }
-
-    // 从 etcd 中获取任务序列 id
     resp, err := Etcd().Cli.Get(ctx, getMaxJobIdKey())
     if err != nil {
         return id, err
@@ -305,6 +276,7 @@ func (jq *jobQueue) getSequenceId(ctx context.Context) (int, error) {
         if err != nil {
             return id, err
         }
+        id += 1
     } else {
         id = 1
     }
@@ -341,9 +313,15 @@ func (j *job) serializeAndSave(fName string) error {
 // 获取 job 存储文件，文件不存在时创建
 func getStoreFile(fName string) (string, error) {
     // 判断目录是否存在，不存在创建
-    rootPath, err := GetRootPath()
-    if err != nil {
-        return "", err
+    var rootPath string
+    var err error
+    if Conf.Storage != "" {
+        rootPath = Conf.Storage
+    } else {
+        rootPath, err = GetRootPath()
+        if err != nil {
+            return "", err
+        }
     }
     d := path.Join(rootPath, Conf.Name+"-data")
     _, err = os.Stat(d)
@@ -377,7 +355,12 @@ func getStoreFile(fName string) (string, error) {
 }
 
 // 同步数据
-func (jq *jobQueue) SyncJob(ctx context.Context, j *job) error {
+func (jq *jobQueue) SyncJob(ctx context.Context, data []byte) error {
+    j := &job{}
+    err := json.Unmarshal(data, j)
+    if err != nil {
+        return err
+    }
     return jq.addAndSave(ctx, j)
 }
 
@@ -471,12 +454,12 @@ func (jq *jobQueue) FindJobById(i int) (j *job, err error) {
 // 获取 job 列表
 func (jq *jobQueue) FindJobList(page, size int) ([]*job, error) {
     list := make([]*job, 0)
-    totalPage := len(jq.Jobs)/size + 1
+    totalPage := int(math.Ceil(float64(len(jq.Jobs)) / float64(size)))
     if page > totalPage {
         return nil, fmt.Errorf("find jobs out of range")
     }
     if page == totalPage {
-        list = jq.Jobs[(page-1)*size : len(jq.Jobs)]
+        list = jq.Jobs[(page-1)*size:]
     } else {
         list = jq.Jobs[(page-1)*size : page*size+1]
     }
