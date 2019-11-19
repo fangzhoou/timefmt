@@ -3,14 +3,13 @@ package core
 import (
     "crypto/md5"
     "encoding/hex"
-    "errors"
     "net"
     "os"
     "path/filepath"
 )
 
 // 获取本地 ip
-func GetLocalIP() (ip string, err error) {
+func GetLocalIP() (ip string) {
     addrs, err := net.InterfaceAddrs()
     if err != nil {
         return
@@ -23,7 +22,7 @@ func GetLocalIP() (ip string, err error) {
             }
         }
     }
-    err = errors.New("IP not found")
+    ip = "127.0.0.1"
     return
 }
 

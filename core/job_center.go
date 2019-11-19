@@ -198,25 +198,16 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
 
 // 更新其它结点数据
 func updateOtherNodeJob(ctx context.Context, j *job) error {
-    master := NewMaster()
-    err := master.getNodeList(ctx)
-    if err != nil {
-        return err
-    }
-    curServer, err := NewServer()
-    if err != nil {
-        return err
-    }
-    // 移除当前结点
-    delete(master.NodeList, getNodePrefix()+curServer.Name)
-
     jobItem, err := json.Marshal(*j)
     if err != nil {
         return err
     }
-    nodeNum := len(master.NodeList)
-    req := make(chan bool, nodeNum)
-    for _, ip := range master.NodeList {
+
+    nodeList := Master().NodeList
+    // 移除当前结点
+    delete(nodeList, getNodePrefix()+Server().Name)
+    req := make(chan bool, len(nodeList))
+    for _, ip := range Master().NodeList {
         url := fmt.Sprintf("http://%s:%d/job/sync", ip, Conf.Port)
         body := bytes.NewReader([]byte(jobItem))
         go postToOtherNode(req, url, body)
@@ -258,6 +249,7 @@ func (jq *jobQueue) addAndSave(ctx context.Context, j *job) error {
         return err
     }
     jq.Jobs = append(jq.Jobs, j)
+    jq.JobsName[j.Name] = 1
     return nil
 }
 
@@ -477,7 +469,10 @@ func (jq *jobQueue) DeleteById(id int) error {
 }
 
 // 任务队列操作
-var JobQueue = &jobQueue{}
+var JobQueue = &jobQueue{
+    Jobs:     make([]*job, 0),
+    JobsName: map[string]int{},
+}
 
 // 初始化 JobQueue
 // 读取本地存储的 job 队列数据
@@ -519,6 +514,7 @@ func loadLocalJobs(ctx context.Context) error {
         }
         JobQueue.mu.Lock()
         JobQueue.Jobs = append(JobQueue.Jobs, j)
+        JobQueue.JobsName[j.Name] = 1
         JobQueue.mu.Unlock()
     }
     log.Info("load local job queue finished")

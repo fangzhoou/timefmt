@@ -63,13 +63,8 @@ func (e *Entry) Run(ctx context.Context) {
     e.Status = StatusExecuting
 
     // 写入 etcd
-    ip, err := GetLocalIP()
-    if err != nil {
-        log.Error(err)
-        Cron.Cancel()
-    }
     values := &runEntry{
-        Ip:       ip,
+        Ip:       Server().IP,
         PrevTime: e.PrevTime,
         NextTime: e.NextTime,
         JobId:    e.Job.Id,

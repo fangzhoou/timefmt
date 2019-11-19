@@ -6,6 +6,8 @@ import (
     "sync"
 
     "github.com/coreos/etcd/mvcc/mvccpb"
+    "github.com/shirou/gopsutil/cpu"
+    "github.com/shirou/gopsutil/mem"
     "go.etcd.io/etcd/clientv3"
 )
 
@@ -14,44 +16,11 @@ const (
     LeaseTime = 3
 )
 
-// 注册服务及心跳监控
-func registerAndWatch(ctx context.Context) error {
-    // 注册服务
-    s, err := NewServer()
-    if err != nil {
-        return err
-    }
-    err = s.register(ctx)
-    if err != nil {
-        return err
-    }
-    go s.keepAlive(ctx)
-
-    // 获取所有服务结点
-    m := NewMaster()
-    err = m.getNodeList(ctx)
-    if err != nil {
-        return err
-    }
-
-    // 启动服务监控
-    go m.watchServers(ctx)
-    return nil
-}
-
 // 服务对象
 type server struct {
     Name    string
     IP      string
     LeaseId clientv3.LeaseID
-}
-
-func NewServer() (*server, error) {
-    ip, err := GetLocalIP()
-    if err != nil {
-        return nil, err
-    }
-    return &server{Name: Md5(ip), IP: ip}, nil
 }
 
 // 注册服务
@@ -99,6 +68,20 @@ func (s *server) keepAlive(ctx context.Context) {
                     Cron.Cancel()
                     return
                 }
+            } else {
+                // 同步服务器状态
+                status, err := getMachineStatus(ctx)
+                if err != nil {
+                    log.Error(err)
+                    Cron.Cancel()
+                    return
+                }
+                _, err = Etcd().Cli.Put(ctx, getNodePrefix()+s.Name+"/status", status, clientv3.WithLease(s.LeaseId))
+                if err != nil {
+                    log.Error(err)
+                    Cron.Cancel()
+                    return
+                }
             }
         }
     }
@@ -107,12 +90,8 @@ func (s *server) keepAlive(ctx context.Context) {
 // 服务监控
 type master struct {
     NodeList map[string]string
-
-    mu sync.Mutex
-}
-
-func NewMaster() *master {
-    return &master{NodeList: map[string]string{}}
+    NodeNum  int
+    mu       sync.Mutex
 }
 
 // 获取服务列表
@@ -121,8 +100,9 @@ func (m *master) getNodeList(ctx context.Context) error {
     if err != nil {
         return err
     }
-    for _, kv := range resp.Kvs {
+    for k, kv := range resp.Kvs {
         m.NodeList[string(kv.Key)] = string(kv.Value)
+        m.NodeNum = k + 1
     }
     return nil
 }
@@ -155,7 +135,77 @@ func (m *master) watchServers(ctx context.Context) {
     }
 }
 
+var (
+    serverInstance *server
+    masterInstance *master
+
+    onceS sync.Once
+    onceM sync.Once
+)
+
+// 当前服务对象
+func Server() *server {
+    onceS.Do(func() {
+        ip := GetLocalIP()
+        serverInstance = &server{
+            Name: Md5(ip),
+            IP:   ip,
+        }
+    })
+    return serverInstance
+}
+
+// 服务管理对象
+func Master() *master {
+    onceM.Do(func() {
+        masterInstance = &master{NodeList: map[string]string{}}
+    })
+    return masterInstance
+}
+
+// 注册服务及心跳监控
+func registerAndWatch(ctx context.Context) error {
+    // 注册服务
+    err := Server().register(ctx)
+    if err != nil {
+        return err
+    }
+    go Server().keepAlive(ctx)
+
+    // 获取所有服务结点
+    err = Master().getNodeList(ctx)
+    if err != nil {
+        return err
+    }
+
+    // 启动服务监控
+    go Master().watchServers(ctx)
+    return nil
+}
+
 // 获取服务节点前缀
 func getNodePrefix() string {
     return Conf.Name + "/node/"
+}
+
+// 获取当前机器运行状态
+// 状态值 = (cpu利用率 * 0.8 + 内存利用率 * 0.2) * 100
+// 状态值越低证明机器越空闲，分配任务时优先选择
+func getMachineStatus(ctx context.Context) (int, error) {
+    var status int
+
+    // 获取物理 cpu 使用率
+    cp, err := cpu.PercentWithContext(ctx, 0, false)
+    if err != nil {
+        return status, err
+    }
+
+    // 内存利用率
+    m, err := mem.VirtualMemoryWithContext(ctx)
+    if err != nil {
+        return status, err
+    }
+
+    status = int((cp[0]*0.8 + m.UsedPercent*0.2) * 100)
+    return status, nil
 }
