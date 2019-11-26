@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/coreos/etcd/mvcc/mvccpb"
-	"go.etcd.io/etcd/clientv3"
 	"io"
 	"io/ioutil"
 	"math"
@@ -20,7 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/coreos/etcd/mvcc/mvccpb"
+	"go.etcd.io/etcd/clientv3"
 )
 
 const (
@@ -176,6 +176,10 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
 		return err
 	}
 	job := NewJob(id, p)
+	jobByte, err := json.Marshal(job)
+	if err != nil {
+		return errors.New("json marshal job failed")
+	}
 	err = jq.addAndSave(ctx, job)
 	if err != nil {
 		return err
@@ -188,54 +192,20 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
 	}
 	em.Unlock()
 
-	// 同步更新其它结点数据 TODO
-	// err = updateOtherNodeJob(ctx, job)
-	// if err != nil {
-	// 	log.Error(err)
-	// }
+	// 同步更新其它结点数据
+	go syncJobToOtherNode(jobByte)
+
 	return nil
 }
 
 // 更新其它结点数据
-func updateOtherNodeJob(ctx context.Context, j *job) error {
-	jobItem, err := json.Marshal(*j)
-	if err != nil {
-		return err
-	}
-
-	nodeList := Master().NodeList
-	// 移除当前结点
-	delete(nodeList, getNodePrefix()+Server().Name)
-	req := make(chan bool, len(nodeList))
-	for _, ip := range Master().NodeList {
-		url := fmt.Sprintf("http://%s:%d/job/sync", ip, Conf.Port)
-		body := bytes.NewReader([]byte(jobItem))
-		go postToOtherNode(req, url, body)
-	}
-	i := 0
-	for {
-		select {
-		case b := <-req:
-			i++
-			if b {
-				return nil
-			}
-		case <-time.After(5 * time.Second): // 5秒超时
-			break
+func syncJobToOtherNode(jobByte []byte) {
+	for _, node := range Master().NodeList {
+		if node.Key != getNodePrefix()+Server().Name {
+			url := fmt.Sprintf("http://%s:%d/job/sync", node.Ip, Conf.Port)
+			body := bytes.NewReader(jobByte)
+			go http.Post(url, "text/html", body)
 		}
-	}
-
-	// 请求都失败了
-	return fmt.Errorf("send data to other nodes failed")
-}
-
-// 请求
-func postToOtherNode(c chan bool, url string, body io.Reader) {
-	_, err := http.Post(url, "text/html", body)
-	if err != nil {
-		c <- false
-	} else {
-		c <- true
 	}
 }
 
@@ -499,7 +469,6 @@ func loadLocalJobs(ctx context.Context) error {
 	buf := bufio.NewReader(file)
 	for {
 		line, err := buf.ReadSlice(JobSeparator)
-		fmt.Println(11, string(line))
 		if err != nil {
 			if err == io.EOF {
 				break

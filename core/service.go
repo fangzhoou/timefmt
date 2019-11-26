@@ -88,9 +88,15 @@ func (s *server) keepAlive(ctx context.Context) {
 	}
 }
 
+// 结点属性
+type node struct {
+	Key string
+	Ip string
+}
+
 // 服务监控
 type master struct {
-	NodeList map[string]string
+	NodeList []*node
 	NodeNum  int
 	mu       sync.Mutex
 }
@@ -102,7 +108,10 @@ func (m *master) getNodeList(ctx context.Context) error {
 		return err
 	}
 	for k, kv := range resp.Kvs {
-		m.NodeList[string(kv.Key)] = string(kv.Value)
+		m.NodeList = append(m.NodeList, &node{
+			Key:string(kv.Key),
+			Ip:string(kv.Value),
+		})
 		m.NodeNum = k + 1
 	}
 	return nil
@@ -122,13 +131,18 @@ func (m *master) watchServers(ctx context.Context) {
 				switch ev.Type {
 				case mvccpb.PUT:
 					m.mu.Lock()
-					m.NodeList[string(ev.Kv.Key)] = string(ev.Kv.Value)
+					m.NodeList = append(m.NodeList, &node{
+						Key:string(ev.Kv.Key),
+						Ip:string(ev.Kv.Value),
+					})
 					m.mu.Unlock()
 				case mvccpb.DELETE:
-					if _, ok := m.NodeList[string(ev.Kv.Key)]; ok {
-						m.mu.Lock()
-						delete(m.NodeList, string(ev.Kv.Key))
-						m.mu.Unlock()
+					for i,v := range m.NodeList {
+						if v.Key == string(ev.Kv.Key) {
+							m.mu.Lock()
+							m.NodeList = append(m.NodeList[:i], m.NodeList[i+1:]...)
+							m.mu.Unlock()
+						}
 					}
 				}
 			}
@@ -159,7 +173,7 @@ func Server() *server {
 // 服务管理对象
 func Master() *master {
 	onceM.Do(func() {
-		masterInstance = &master{NodeList: map[string]string{}}
+		masterInstance = &master{NodeList: make([]*node, 0)}
 	})
 	return masterInstance
 }
