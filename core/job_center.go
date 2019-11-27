@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/clientv3"
@@ -180,32 +181,70 @@ func (jq *jobQueue) Add(ctx context.Context, p map[string]interface{}) error {
 	if err != nil {
 		return errors.New("json marshal job failed")
 	}
-	err = jq.addAndSave(ctx, job)
+
+	// 更新任务最大id
+	_, err = Etcd().Cli.Put(ctx, getMaxJobIdKey(), strconv.Itoa(id))
 	if err != nil {
 		return err
 	}
 
-	// 更新最大id
-	_, err = Etcd().Cli.Put(ctx, getMaxJobIdKey(), strconv.Itoa(id))
+	// 更新待同步任务列表，新增记录
+	// dcron/new_job_list/{id} => string(job)
+	_, err = Etcd().Cli.Put(ctx, getNewJobKey(id), string(jobByte))
+	if err != nil {
+		return err
+	}
+
+	// 保存到本地
+	// 保存本地操作在同步 etcd 成功后操作，这样可以避免当前结点同步 etcd 失败后，
+	// 再重启服务结点出现数据不同步问题。
+	err = jq.addAndSave(ctx, job)
 	if err != nil {
 		return err
 	}
 	em.Unlock()
 
 	// 同步更新其它结点数据
-	go syncJobToOtherNode(jobByte)
+	go syncJobToOtherNode(ctx, id, jobByte)
 
 	return nil
 }
 
 // 更新其它结点数据
-func syncJobToOtherNode(jobByte []byte) {
+func syncJobToOtherNode(ctx context.Context, jobId int, jobByte []byte) {
+	syncRe := make(chan bool, 1)
+	var n int
 	for _, node := range Master().NodeList {
 		if node.Key != getNodePrefix()+Server().Name {
+			n++
 			url := fmt.Sprintf("http://%s:%d/job/sync", node.Ip, Conf.Port)
 			body := bytes.NewReader(jobByte)
-			go http.Post(url, "text/html", body)
+			go func(c chan<- bool) {
+				_, err := http.Post(url, "text/html", body)
+				if err != nil {
+					c <- false
+				} else {
+					c <- true
+				}
+			}(syncRe)
 		}
+	}
+
+	i := 0
+	for {
+		select {
+		case b := <-syncRe:
+			if b {
+				i++
+			}
+		case <-time.After(5 * time.Second):
+			break
+		}
+	}
+
+	// 所有结点同步成功，删除对应的任务数据
+	if i == n {
+		Etcd().Cli.Delete(ctx, getNewJobKey(jobId))
 	}
 }
 
@@ -218,7 +257,15 @@ func (jq *jobQueue) addAndSave(ctx context.Context, j *job) error {
 	if err != nil {
 		return err
 	}
-	jq.Jobs = append(jq.Jobs, j)
+	// 任务按 id 由小到大排序
+	for i := len(jq.Jobs) - 1; i >= 0; i-- {
+		if jq.Jobs[i].Id < j.Id {
+			new := make([]*job, len(jq.Jobs[i+1:]))
+			copy(new, jq.Jobs[i+1:])
+			jq.Jobs = append(append(jq.Jobs[:i+1], j), new...)
+			break
+		}
+	}
 	jq.JobsName[j.Name] = 1
 	return nil
 }
@@ -597,4 +644,14 @@ func getMaxJobIdKey() string {
 // 获取添加任务时的 etcd 锁 key
 func getAddJobMutexKey() string {
 	return Conf.Name + "/job/add_lock"
+}
+
+// 获取新增任务列表 key
+func getNewJobListKey() string {
+	return Conf.Name + "/new_job_list"
+}
+
+// 获取新增的单个任务key
+func getNewJobKey(jobId int) string {
+	return getNewJobListKey() + "/" + strconv.Itoa(jobId)
 }
